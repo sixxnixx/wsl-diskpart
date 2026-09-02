@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 [CmdletBinding()]
 param(
     [Alias('d')]
@@ -36,6 +36,93 @@ function Quote-ProcessArgument {
     }
 
     return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Convert-NativeBytesToText {
+    param(
+        [AllowNull()]
+        [byte[]] $Bytes
+    )
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
+        return ''
+    }
+
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+        return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    }
+
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+        return [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    }
+
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        return [Text.Encoding]::UTF8.GetString($Bytes, 3, $Bytes.Length - 3)
+    }
+
+    # wsl.exe and diskpart.exe emit UTF-16LE when their output is redirected.
+    return [Text.Encoding]::Unicode.GetString($Bytes)
+}
+
+function Invoke-NativeCommandCapture {
+    param(
+        [Parameter(Mandatory)]
+        [string] $FilePath,
+
+        [string[]] $ArgumentList = @()
+    )
+
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('wsl-diskpart-native-{0}' -f ([Guid]::NewGuid().ToString('N')))
+    $stdoutPath = $tempRoot + '.out'
+    $stderrPath = $tempRoot + '.err'
+
+    try {
+        $argumentString = @(
+            $ArgumentList |
+                Where-Object { $null -ne $_ } |
+                ForEach-Object { Quote-ProcessArgument ([string] $_) }
+        ) -join ' '
+
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $argumentString `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+
+        $stdout = ''
+        $stderr = ''
+
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            $stdout = Convert-NativeBytesToText ([IO.File]::ReadAllBytes($stdoutPath))
+        }
+
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $stderr = Convert-NativeBytesToText ([IO.File]::ReadAllBytes($stderrPath))
+        }
+
+        return [pscustomobject] @{
+            ExitCode       = [int] $process.ExitCode
+            StandardOutput = $stdout
+            StandardError  = $stderr
+        }
+    }
+    catch {
+        return [pscustomobject] @{
+            ExitCode       = 1
+            StandardOutput = ''
+            StandardError  = $_.Exception.Message
+        }
+    }
+    finally {
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Start-ElevatedSelf {
@@ -401,12 +488,13 @@ function Get-TerminalProfiles {
 
 function Get-WslStatuses {
     try {
-        $text = (& wsl.exe --list --verbose 2>&1 | Out-String).Trim()
-        $text = $text.Replace(([char] 0).ToString(), '')
+        $nativeResult = Invoke-NativeCommandCapture -FilePath 'wsl.exe' -ArgumentList @('--list', '--verbose')
 
-        if ($LASTEXITCODE -ne 0) {
+        if ($nativeResult.ExitCode -ne 0) {
             return @()
         }
+
+        $text = ([string] $nativeResult.StandardOutput).Trim()
 
         $result = @()
 
@@ -694,39 +782,50 @@ function Resolve-Selection {
     }
 }
 
-function Invoke-DiskPartCompact {
+function Invoke-DiskPartCommands {
     param(
         [Parameter(Mandatory)]
+        [string[]] $Commands,
+
+        [AllowNull()]
         [string] $VhdxPath
     )
 
     $diskPartScript = Join-Path ([IO.Path]::GetTempPath()) ('wsl-diskpart-{0}.txt' -f ([Guid]::NewGuid().ToString('N')))
 
-    $commands = @(
-        ('select vdisk file="{0}"' -f $VhdxPath)
-        'attach vdisk readonly'
-        'compact vdisk'
-        'detach vdisk'
-        'exit'
-    )
-
     try {
-        $content = ($commands -join [Environment]::NewLine) + [Environment]::NewLine
+        $content = ($Commands -join [Environment]::NewLine) + [Environment]::NewLine
         [IO.File]::WriteAllText($diskPartScript, $content, [Text.Encoding]::Unicode)
 
-        $output = (& diskpart.exe /s $diskPartScript 2>&1 | Out-String).Trim()
-        $exitCode = $LASTEXITCODE
-        $hasError = $output -match '(?i)error|failed|failure|cannot|could not|not found|access is denied|エラー|失敗|見つかりません|アクセスが拒否'
+        $nativeResult = Invoke-NativeCommandCapture -FilePath 'diskpart.exe' -ArgumentList @('/s', $diskPartScript)
+        $outputParts = @()
+
+        if (-not [string]::IsNullOrWhiteSpace($nativeResult.StandardOutput)) {
+            $outputParts += [string] $nativeResult.StandardOutput
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($nativeResult.StandardError)) {
+            $outputParts += [string] $nativeResult.StandardError
+        }
+
+        $output = ($outputParts -join [Environment]::NewLine).Trim()
+        $errorText = $output
+
+        if (-not [string]::IsNullOrWhiteSpace($VhdxPath)) {
+            $errorText = $errorText.Replace($VhdxPath, '')
+        }
+
+        $hasError = $errorText -match '(?i)error|failed|failure|cannot|could not|not found|access is denied|エラー|失敗|見つかりません|アクセスが拒否'
 
         if ($hasError) {
             $message = 'DiskPartがエラーを返しました。'
         }
         else {
-            $message = '終了コード {0}' -f $exitCode
+            $message = '終了コード {0}' -f $nativeResult.ExitCode
         }
 
         return [pscustomobject] @{
-            Succeeded = ($exitCode -eq 0 -and -not $hasError)
+            Succeeded = ($nativeResult.ExitCode -eq 0 -and -not $hasError)
             Message   = $message
             Output    = $output
         }
@@ -742,6 +841,95 @@ function Invoke-DiskPartCompact {
         if (Test-Path -LiteralPath $diskPartScript) {
             Remove-Item -LiteralPath $diskPartScript -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Invoke-DiskPartCompact {
+    param(
+        [Parameter(Mandatory)]
+        [string] $VhdxPath
+    )
+
+    $selectCommand = 'select vdisk file="{0}"' -f $VhdxPath
+
+    $attachResult = Invoke-DiskPartCommands -Commands @(
+        $selectCommand
+        'attach vdisk readonly'
+        'exit'
+    ) -VhdxPath $VhdxPath
+
+    if (-not $attachResult.Succeeded) {
+        return [pscustomobject] @{
+            Succeeded = $false
+            Message   = 'VHDXの接続に失敗しました: {0}' -f $attachResult.Message
+            Output    = $attachResult.Output
+        }
+    }
+
+    $compactResult = $null
+    $detachResult = $null
+
+    try {
+        $compactResult = Invoke-DiskPartCommands -Commands @(
+            $selectCommand
+            'compact vdisk'
+            'exit'
+        ) -VhdxPath $VhdxPath
+    }
+    catch {
+        $compactResult = [pscustomobject] @{
+            Succeeded = $false
+            Message   = $_.Exception.Message
+            Output    = ''
+        }
+    }
+    finally {
+        try {
+            $detachResult = Invoke-DiskPartCommands -Commands @(
+                $selectCommand
+                'detach vdisk'
+                'exit'
+            ) -VhdxPath $VhdxPath
+        }
+        catch {
+            $detachResult = [pscustomobject] @{
+                Succeeded = $false
+                Message   = $_.Exception.Message
+                Output    = ''
+            }
+        }
+    }
+
+    $outputParts = @($attachResult.Output, $compactResult.Output, $detachResult.Output) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $output = ($outputParts -join [Environment]::NewLine).Trim()
+
+    if (-not $compactResult.Succeeded) {
+        $message = 'VHDXの圧縮に失敗しました: {0}' -f $compactResult.Message
+
+        if (-not $detachResult.Succeeded) {
+            $message += ' 切り離しにも失敗しました: {0}' -f $detachResult.Message
+        }
+
+        return [pscustomobject] @{
+            Succeeded = $false
+            Message   = $message
+            Output    = $output
+        }
+    }
+
+    if (-not $detachResult.Succeeded) {
+        return [pscustomobject] @{
+            Succeeded = $false
+            Message   = 'VHDXの圧縮は完了しましたが、切り離しに失敗しました: {0}' -f $detachResult.Message
+            Output    = $output
+        }
+    }
+
+    return [pscustomobject] @{
+        Succeeded = $true
+        Message   = '終了コード 0'
+        Output    = $output
     }
 }
 
@@ -829,8 +1017,26 @@ $failed = 0
 
 foreach ($item in $selected) {
     Write-Host ('[{0}] 圧縮しています...' -f $item.DisplayName)
-    $before = (Get-Item -LiteralPath $item.VhdxPath).Length
-    $result = Invoke-DiskPartCompact -VhdxPath $item.VhdxPath
+
+    try {
+        $before = (Get-Item -LiteralPath $item.VhdxPath -ErrorAction Stop).Length
+    }
+    catch {
+        $failed++
+        Write-Error ('開始前にVHDXを読み取れませんでした: {0}' -f $_.Exception.Message)
+        continue
+    }
+
+    try {
+        $result = Invoke-DiskPartCompact -VhdxPath $item.VhdxPath
+    }
+    catch {
+        $result = [pscustomobject] @{
+            Succeeded = $false
+            Message   = $_.Exception.Message
+            Output    = ''
+        }
+    }
 
     if (-not $result.Succeeded) {
         $failed++
@@ -843,7 +1049,15 @@ foreach ($item in $selected) {
         continue
     }
 
-    $after = (Get-Item -LiteralPath $item.VhdxPath).Length
+    try {
+        $after = (Get-Item -LiteralPath $item.VhdxPath -ErrorAction Stop).Length
+    }
+    catch {
+        $failed++
+        Write-Error ('処理後にVHDXのサイズを確認できませんでした: {0}' -f $_.Exception.Message)
+        continue
+    }
+
     Write-Host '  完了しました。'
     Write-Host ('  サイズ: {0} → {1}' -f (Format-Bytes $before), (Format-Bytes $after))
 }
