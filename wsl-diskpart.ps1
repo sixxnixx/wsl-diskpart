@@ -19,6 +19,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$DiskPartScriptWaitSeconds = 15
+$DiskPartMaxAttempts = 3
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -28,8 +31,13 @@ function Test-Administrator {
 function Quote-ProcessArgument {
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string] $Value
     )
+
+    if ($Value.Length -eq 0) {
+        return '""'
+    }
 
     if ($Value -notmatch '[\s"]') {
         return $Value
@@ -62,6 +70,27 @@ function Convert-NativeBytesToText {
 
     # wsl.exe and diskpart.exe emit UTF-16LE when their output is redirected.
     return [Text.Encoding]::Unicode.GetString($Bytes)
+}
+
+function Get-DiskPartScriptEncoding {
+    # DiskPart's /s reader expects a legacy text script. UTF-16LE inserts NUL
+    # bytes between ASCII command characters and can make the script a no-op.
+    try {
+        $codePage = [int] (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage' -Name ACP -ErrorAction Stop).ACP
+
+        return [Text.Encoding]::GetEncoding(
+            $codePage,
+            [Text.EncoderFallback]::ExceptionFallback,
+            [Text.DecoderFallback]::ExceptionFallback
+        )
+    }
+    catch {
+        return [Text.Encoding]::GetEncoding(
+            20127,
+            [Text.EncoderFallback]::ExceptionFallback,
+            [Text.DecoderFallback]::ExceptionFallback
+        )
+    }
 }
 
 function Invoke-NativeCommandCapture {
@@ -171,7 +200,9 @@ function Start-ElevatedSelf {
     }
 
     foreach ($name in @($Distro)) {
-        $rawArguments += @('-Distro', $name)
+        if ($null -ne $name) {
+            $rawArguments += @('-Distro', $name)
+        }
     }
 
     $argumentString = ($rawArguments | ForEach-Object {
@@ -190,6 +221,10 @@ function Start-ElevatedSelf {
             Write-Error ('管理者としての再起動に失敗しました: {0}' -f $_.Exception.Message)
         }
 
+        return 1
+    }
+    catch {
+        Write-Error ('管理者としての再起動に失敗しました: {0}' -f $_.Exception.Message)
         return 1
     }
 }
@@ -795,7 +830,7 @@ function Invoke-DiskPartCommands {
 
     try {
         $content = ($Commands -join [Environment]::NewLine) + [Environment]::NewLine
-        [IO.File]::WriteAllText($diskPartScript, $content, [Text.Encoding]::Unicode)
+        [IO.File]::WriteAllText($diskPartScript, $content, (Get-DiskPartScriptEncoding))
 
         $nativeResult = Invoke-NativeCommandCapture -FilePath 'diskpart.exe' -ArgumentList @('/s', $diskPartScript)
         $outputParts = @()
@@ -844,6 +879,70 @@ function Invoke-DiskPartCommands {
     }
 }
 
+function Get-VhdmpEventValidation {
+    param(
+        [Parameter(Mandatory)]
+        [string] $VhdxPath,
+
+        [Parameter(Mandatory)]
+        [datetime] $StartTime
+    )
+
+    $logName = 'Microsoft-Windows-VHDMP-Operational'
+    $result = [pscustomobject] @{
+        QuerySucceeded = $false
+        AttachSuccess  = $false
+        CompactSuccess = $false
+        DetachSuccess  = $false
+    }
+
+    try {
+        Get-WinEvent -ListLog $logName -ErrorAction Stop | Out-Null
+    }
+    catch {
+        return $result
+    }
+
+    try {
+        $events = @(
+            Get-WinEvent -FilterHashtable @{
+                LogName   = $logName
+                Id        = @(1, 2, 51)
+                StartTime = $StartTime
+                EndTime   = (Get-Date)
+            } -ErrorAction Stop |
+                Where-Object { $_.Message -like ('*{0}*' -f $VhdxPath) }
+        )
+
+        $result.QuerySucceeded = $true
+        $result.AttachSuccess = @($events | Where-Object { $_.Id -eq 1 }).Count -gt 0
+        $result.CompactSuccess = @($events | Where-Object { $_.Id -eq 51 }).Count -gt 0
+        $result.DetachSuccess = @($events | Where-Object { $_.Id -eq 2 }).Count -gt 0
+    }
+    catch {
+        if ($_.Exception.Message -match '(?i)no events were found|イベントが見つかりません') {
+            $result.QuerySucceeded = $true
+        }
+    }
+
+    return $result
+}
+
+function Invoke-DiskPartDetachBestEffort {
+    param(
+        [Parameter(Mandatory)]
+        [string] $VhdxPath
+    )
+
+    $selectCommand = 'select vdisk file="{0}"' -f $VhdxPath
+
+    return Invoke-DiskPartCommands -Commands @(
+        $selectCommand
+        'detach vdisk noerr'
+        'exit'
+    ) -VhdxPath $VhdxPath
+}
+
 function Invoke-DiskPartCompact {
     param(
         [Parameter(Mandatory)]
@@ -852,85 +951,86 @@ function Invoke-DiskPartCompact {
 
     $selectCommand = 'select vdisk file="{0}"' -f $VhdxPath
 
-    $attachResult = Invoke-DiskPartCommands -Commands @(
+    $commands = @(
         $selectCommand
         'attach vdisk readonly'
+        'compact vdisk'
+        'detach vdisk'
         'exit'
-    ) -VhdxPath $VhdxPath
+    )
 
-    if (-not $attachResult.Succeeded) {
-        return [pscustomobject] @{
-            Succeeded = $false
-            Message   = 'VHDXの接続に失敗しました: {0}' -f $attachResult.Message
-            Output    = $attachResult.Output
-        }
+    $lastResult = [pscustomobject] @{
+        Succeeded = $false
+        Message   = 'DiskPartを実行できませんでした。'
+        Output    = ''
     }
 
-    $compactResult = $null
-    $detachResult = $null
+    for ($attempt = 1; $attempt -le $DiskPartMaxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-Host ('  VHDXの解放を待って再試行します（{0}/{1}）。' -f $attempt, $DiskPartMaxAttempts)
+            Start-Sleep -Seconds $DiskPartScriptWaitSeconds
+        }
 
-    try {
-        $compactResult = Invoke-DiskPartCommands -Commands @(
-            $selectCommand
-            'compact vdisk'
-            'exit'
-        ) -VhdxPath $VhdxPath
-    }
-    catch {
-        $compactResult = [pscustomobject] @{
-            Succeeded = $false
-            Message   = $_.Exception.Message
-            Output    = ''
-        }
-    }
-    finally {
-        try {
-            $detachResult = Invoke-DiskPartCommands -Commands @(
-                $selectCommand
-                'detach vdisk'
-                'exit'
-            ) -VhdxPath $VhdxPath
-        }
-        catch {
-            $detachResult = [pscustomobject] @{
+        $startedAt = Get-Date
+        $diskPartResult = Invoke-DiskPartCommands -Commands $commands -VhdxPath $VhdxPath
+        $eventValidation = Get-VhdmpEventValidation -VhdxPath $VhdxPath -StartTime $startedAt
+
+        if ($eventValidation.QuerySucceeded) {
+            if ($eventValidation.AttachSuccess -and $eventValidation.CompactSuccess -and $eventValidation.DetachSuccess) {
+                return [pscustomobject] @{
+                    Succeeded = $true
+                    Message   = 'DiskPartの圧縮成功と切り離し成功を確認しました。'
+                    Output    = $diskPartResult.Output
+                }
+            }
+
+            $missing = @()
+
+            if (-not $eventValidation.AttachSuccess) {
+                $missing += 'Attach成功イベント'
+            }
+
+            if (-not $eventValidation.CompactSuccess) {
+                $missing += 'Compact成功イベント'
+            }
+
+            if (-not $eventValidation.DetachSuccess) {
+                $missing += 'Detach成功イベント'
+            }
+
+            if ($diskPartResult.Succeeded) {
+                $message = 'DiskPartの完了を確認できませんでした: {0}' -f ($missing -join '、')
+            }
+            else {
+                $message = 'DiskPartの実行に失敗しました: {0} 完了イベント不足: {1}' -f $diskPartResult.Message, ($missing -join '、')
+            }
+
+            $lastResult = [pscustomobject] @{
                 Succeeded = $false
-                Message   = $_.Exception.Message
-                Output    = ''
+                Message   = $message
+                Output    = $diskPartResult.Output
             }
         }
-    }
-
-    $outputParts = @($attachResult.Output, $compactResult.Output, $detachResult.Output) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    $output = ($outputParts -join [Environment]::NewLine).Trim()
-
-    if (-not $compactResult.Succeeded) {
-        $message = 'VHDXの圧縮に失敗しました: {0}' -f $compactResult.Message
-
-        if (-not $detachResult.Succeeded) {
-            $message += ' 切り離しにも失敗しました: {0}' -f $detachResult.Message
+        elseif ($diskPartResult.Succeeded) {
+            return [pscustomobject] @{
+                Succeeded = $true
+                Message   = '終了コード 0（VHDMPイベントログは利用できませんでした）'
+                Output    = $diskPartResult.Output
+            }
+        }
+        else {
+            $lastResult = $diskPartResult
         }
 
-        return [pscustomobject] @{
-            Succeeded = $false
-            Message   = $message
-            Output    = $output
-        }
-    }
+        $cleanupNeeded = -not $eventValidation.QuerySucceeded -or $eventValidation.AttachSuccess
 
-    if (-not $detachResult.Succeeded) {
-        return [pscustomobject] @{
-            Succeeded = $false
-            Message   = 'VHDXの圧縮は完了しましたが、切り離しに失敗しました: {0}' -f $detachResult.Message
-            Output    = $output
+        if ($attempt -lt $DiskPartMaxAttempts -and $cleanupNeeded) {
+            Start-Sleep -Seconds $DiskPartScriptWaitSeconds
+            Invoke-DiskPartDetachBestEffort -VhdxPath $VhdxPath | Out-Null
         }
     }
 
-    return [pscustomobject] @{
-        Succeeded = $true
-        Message   = '終了コード 0'
-        Output    = $output
-    }
+    return $lastResult
 }
 
 $distroCount = if ($null -eq $Distro) { 0 } else { $Distro.Count }
@@ -985,6 +1085,11 @@ if ($DryRun) {
     exit 0
 }
 
+if (-not (Test-Administrator)) {
+    Write-Error 'DiskPartを実行するには管理者権限が必要です。管理者としてPowerShellを起動して再実行してください。'
+    exit 1
+}
+
 Write-Host ''
 Write-Host '実行すると、最初に全てのWSLディストロを停止します。'
 
@@ -1010,12 +1115,19 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Start-Sleep -Seconds 1
-Write-Host 'WSLのシャットダウンが完了しました。'
+Write-Host ('WSLのシャットダウンが完了しました。VHDXの解放を{0}秒待機しています...' -f $DiskPartScriptWaitSeconds)
+Start-Sleep -Seconds $DiskPartScriptWaitSeconds
 
 $failed = 0
+$processedCount = 0
 
 foreach ($item in $selected) {
+    if ($processedCount -gt 0) {
+        Write-Host ('前のDiskPart処理の終了を待機しています（{0}秒）...' -f $DiskPartScriptWaitSeconds)
+        Start-Sleep -Seconds $DiskPartScriptWaitSeconds
+    }
+
+    $processedCount++
     Write-Host ('[{0}] 圧縮しています...' -f $item.DisplayName)
 
     try {
@@ -1058,6 +1170,10 @@ foreach ($item in $selected) {
         continue
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($result.Message)) {
+        Write-Host ('  確認: {0}' -f $result.Message)
+    }
+
     Write-Host '  完了しました。'
     Write-Host ('  サイズ: {0} → {1}' -f (Format-Bytes $before), (Format-Bytes $after))
 }
@@ -1069,4 +1185,3 @@ if ($failed -gt 0) {
 
 Write-Host '全ての対象ディストロの圧縮が完了しました。'
 exit 0
-
