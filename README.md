@@ -1,6 +1,73 @@
+# WSL VHDX Compactor
+
+A CUI utility that runs in PowerShell. It shuts down WSL and executes DiskPart's `attach`, `compact`, and `detach` commands in sequence for each target distribution's `ext4.vhdx`.
+
+## Usage
+
+Move to the project directory in PowerShell and run the following commands.
+
+    Set-ExecutionPolicy -Scope Process Bypass
+    .\wsl-diskpart.ps1
+
+When launched, the utility displays detected WSL distributions and their VHDX locations, and lets you select targets by number. For operations that require administrator privileges, it automatically restarts as administrator through UAC.
+
+Fixed runtime messages follow the OS UI language. Japanese (`ja-*`) displays Japanese; all other languages display English. Distribution names, paths, and other identifiers are left unchanged.
+
+    # Display detected targets only
+    .\wsl-diskpart.ps1 -List
+
+    # Process all targets
+    .\wsl-diskpart.ps1 -All
+
+    # Specify a Windows Terminal display name or WSL name
+    .\wsl-diskpart.ps1 -Distro Ubuntu
+
+    # Specify multiple targets by number
+    .\wsl-diskpart.ps1 -Distro 1,3
+
+    # Check targets only without making changes
+    .\wsl-diskpart.ps1 -All -DryRun
+
+    # Skip the final confirmation
+    .\wsl-diskpart.ps1 -All -Yes
+
+## Distribution and VHDX Mapping
+
+VHDX paths are searched in the following order.
+
+1. WSL registration information under `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
+2. `BasePath` and `VhdFileName` in the registry
+3. `%LOCALAPPDATA%\wsl\<registration ID>\ext4.vhdx`
+4. `ext4.vhdx` files under `%LOCALAPPDATA%\wsl`
+
+Display names are matched against `profiles.list[].name` in Windows Terminal's `settings.json`. If no match is found, the WSL `DistributionName` is used. JSONC comments and trailing commas are supported.
+
+VHDX files that are not registered in the registry are displayed as `Unregistered VHDX`.
+
+## DiskPart Commands
+
+After target confirmation, the utility creates a temporary script for each distribution and executes the following commands.
+
+    wsl.exe --shutdown
+    select vdisk file="<absolute path to ext4.vhdx>"
+    attach vdisk readonly
+    compact vdisk
+    detach vdisk
+    exit
+
+All DiskPart commands for a target are executed in one script. The temporary script loaded with `/s` is generated using the system ANSI code page supported by DiskPart. The utility waits 15 seconds after shutting down WSL and between multiple distribution operations so that the VHDX can be released. If the file is in use, it retries up to three times and verifies attach, compact, and detach completion in the VHDMP event log.
+
+## Notes
+
+- `wsl --shutdown` stops all running WSL distributions.
+- Close applications that use WSL, such as Docker Desktop and WSL tabs in Windows Terminal, before running the utility.
+- Back up important environments beforehand because the utility modifies VHDX files.
+- If DiskPart fails, review the output for the target distribution before running the utility again.
+- The file size may not change significantly if unused space has not been released inside the guest environment, for example.
+
 # WSL VHDX コンパクター
 
-PowerShellで動作するCUIユーティリティです。WSLを停止し、対象ディストロのext4.vhdxに対してDiskPartのattach、compact、detachを順番に実行します。
+PowerShellで動作するCUIユーティリティです。WSLを停止し、対象ディストロの`ext4.vhdx`に対してDiskPartの`attach`、`compact`、`detach`を順番に実行します。
 
 ## 実行方法
 
@@ -35,12 +102,12 @@ PowerShellでプロジェクトフォルダへ移動し、次のように実行�
 
 VHDXのパスは次の順番で探索します。
 
-1. HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss のWSL登録情報
-2. レジストリのBasePathとVhdFileName
-3. %LOCALAPPDATA%\wsl\<登録ID>\ext4.vhdx
-4. %LOCALAPPDATA%\wsl 以下のext4.vhdx
+1. `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` のWSL登録情報
+2. レジストリの`BasePath`と`VhdFileName`
+3. `%LOCALAPPDATA%\wsl\<登録ID>\ext4.vhdx`
+4. `%LOCALAPPDATA%\wsl` 以下の`ext4.vhdx`
 
-表示名はWindows Terminalのsettings.jsonにあるprofiles.list[].nameと照合します。照合できない場合はWSLのDistributionNameを使用します。JSONCのコメントと末尾カンマにも対応しています。
+表示名はWindows Terminalの`settings.json`にある`profiles.list[].name`と照合します。照合できない場合はWSLの`DistributionName`を使用します。JSONCのコメントと末尾カンマにも対応しています。
 
 レジストリに登録されていないVHDXは「未登録 VHDX」として表示します。
 
@@ -59,7 +126,7 @@ DiskPartの各コマンドは1つのスクリプトで実行します。`/s`で�
 
 ## 注意事項
 
-- wsl --shutdownにより、起動中のすべてのWSLディストロが停止します。
+- `wsl --shutdown`により、起動中のすべてのWSLディストロが停止します。
 - Docker DesktopやWindows TerminalのWSLタブなど、WSLを使用するアプリは事前に終了してください。
 - VHDXを変更するため、重要な環境では事前にバックアップを作成してください。
 - DiskPartが失敗した場合は、対象ディストロの出力を確認してから再実行してください。
