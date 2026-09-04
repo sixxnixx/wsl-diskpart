@@ -21,6 +21,8 @@ $ErrorActionPreference = 'Stop'
 
 $DiskPartScriptWaitSeconds = 15
 $DiskPartMaxAttempts = 3
+$VhdmpEventWaitSeconds = 30
+$VhdmpEventPollMilliseconds = 500
 
 function Get-UiLanguage {
     $cultureName = $null
@@ -1162,52 +1164,76 @@ function Get-VhdmpEventValidation {
         return $result
     }
 
-    try {
-        $events = @(
-            Get-WinEvent -FilterHashtable @{
-                LogName   = $logName
-                Id        = $eventIds
-                StartTime = $StartTime
-                EndTime   = (Get-Date)
-            } -ErrorAction Stop |
-                Where-Object {
-                    ([string] $_.Message).IndexOf($VhdxPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                } |
-                Sort-Object RecordId
-        )
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0, $VhdmpEventWaitSeconds))
 
-        $result.QuerySucceeded = $true
+    do {
+        $result.QuerySucceeded = $false
+        $result.AttachSuccess = $false
+        $result.CompactSuccess = $false
+        $result.DetachSuccess = $false
+
+        try {
+            $events = @(
+                Get-WinEvent -FilterHashtable @{
+                    LogName   = $logName
+                    Id        = $eventIds
+                    StartTime = $StartTime
+                    EndTime   = (Get-Date)
+                } -ErrorAction Stop |
+                    Where-Object {
+                        ([string] $_.Message).IndexOf($VhdxPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                    } |
+                    Sort-Object RecordId
+            )
+
+            $result.QuerySucceeded = $true
+        }
+        catch {
+            if ($_.Exception.Message -match '(?i)no events were found|イベントが見つかりません') {
+                $result.QuerySucceeded = $true
+                $events = @()
+            }
+            else {
+                return $result
+            }
+        }
 
         if ($DetachOnly) {
             $result.DetachSuccess = @($events | Where-Object { $_.Id -eq 2 }).Count -gt 0
-            return $result
+
+            if ($result.DetachSuccess) {
+                return $result
+            }
         }
+        else {
+            $attachEvent = $events | Where-Object { $_.Id -eq 1 } | Select-Object -First 1
 
-        $attachEvent = $events | Where-Object { $_.Id -eq 1 } | Select-Object -First 1
-
-        if ($null -ne $attachEvent) {
-            $result.AttachSuccess = $true
-            $compactEvent = $events |
-                Where-Object { $_.Id -eq 51 -and $_.RecordId -gt $attachEvent.RecordId } |
-                Select-Object -First 1
-
-            if ($null -ne $compactEvent) {
-                $result.CompactSuccess = $true
-                $detachEvent = $events |
-                    Where-Object { $_.Id -eq 2 -and $_.RecordId -gt $compactEvent.RecordId } |
+            if ($null -ne $attachEvent) {
+                $result.AttachSuccess = $true
+                $compactEvent = $events |
+                    Where-Object { $_.Id -eq 51 -and $_.RecordId -gt $attachEvent.RecordId } |
                     Select-Object -First 1
 
-                if ($null -ne $detachEvent) {
-                    $result.DetachSuccess = $true
+                if ($null -ne $compactEvent) {
+                    $result.CompactSuccess = $true
+                    $detachEvent = $events |
+                        Where-Object { $_.Id -eq 2 -and $_.RecordId -gt $compactEvent.RecordId } |
+                        Select-Object -First 1
+
+                    if ($null -ne $detachEvent) {
+                        $result.DetachSuccess = $true
+                        return $result
+                    }
                 }
             }
         }
-    }
-    catch {
-        if ($_.Exception.Message -match '(?i)no events were found|イベントが見つかりません') {
-            $result.QuerySucceeded = $true
+
+        if ((Get-Date) -ge $deadline) {
+            break
         }
-    }
+
+        Start-Sleep -Milliseconds $VhdmpEventPollMilliseconds
+    } while ($true)
 
     return $result
 }
