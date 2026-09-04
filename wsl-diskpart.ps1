@@ -22,6 +22,240 @@ $ErrorActionPreference = 'Stop'
 $DiskPartScriptWaitSeconds = 15
 $DiskPartMaxAttempts = 3
 
+function Get-UiLanguage {
+    $cultureName = $null
+
+    try {
+        # Read the Windows user display language directly. This avoids using a
+        # PowerShell process UI culture, which can differ between pwsh and
+        # Windows PowerShell even when the Windows display language is the same.
+        if (-not ('WslDiskPart.NativeLanguage' -as [type])) {
+            [void] (Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace WslDiskPart {
+    public static class NativeLanguage {
+        [DllImport("kernel32.dll")]
+        public static extern ushort GetUserDefaultUILanguage();
+    }
+}
+'@)
+        }
+
+        $languageId = [WslDiskPart.NativeLanguage]::GetUserDefaultUILanguage()
+
+        if ($languageId -gt 0) {
+            $cultureName = [string] ([Globalization.CultureInfo]::GetCultureInfo([int] $languageId).Name)
+        }
+    }
+    catch {
+    }
+
+    if ([string]::IsNullOrWhiteSpace($cultureName)) {
+        try {
+            $preferredUiLanguages = @(
+                (Get-ItemProperty `
+                    -LiteralPath 'HKCU:\Control Panel\Desktop\MuiCached' `
+                    -Name 'MachinePreferredUILanguages' `
+                    -ErrorAction Stop).MachinePreferredUILanguages
+            )
+
+            if ($preferredUiLanguages.Count -gt 0) {
+                $cultureName = [string] $preferredUiLanguages[0]
+            }
+        }
+        catch {
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($cultureName)) {
+        try {
+            $languageList = @(Get-WinUserLanguageList | Select-Object -First 1)
+
+            if ($languageList.Count -gt 0) {
+                $cultureName = [string] $languageList[0].LanguageTag
+            }
+        }
+        catch {
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($cultureName)) {
+        try {
+            $cultureName = [string] ((Get-UICulture).Name)
+        }
+        catch {
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($cultureName)) {
+        try {
+            $cultureName = [string] ([Globalization.CultureInfo]::CurrentUICulture.Name)
+        }
+        catch {
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($cultureName)) {
+        try {
+            $cultureName = [string] ([Globalization.CultureInfo]::InstalledUICulture.Name)
+        }
+        catch {
+        }
+    }
+
+    if ($cultureName -match '^(?i:ja)(?:-|$)') {
+        return 'ja'
+    }
+
+    return 'en'
+}
+
+$script:UiLanguage = Get-UiLanguage
+
+$script:Messages = @{
+    en = @{
+        ScriptPathMissing             = 'Cannot relaunch as administrator because the script path could not be determined.'
+        ElevationCanceled             = 'The user canceled the administrator elevation request.'
+        ElevationFailedWin32          = 'Failed to relaunch as administrator (Win32 error {0}).'
+        ElevationFailed               = 'Failed to relaunch as administrator.'
+        DetectedTargets               = 'Detected targets:'
+        TerminalLabel                 = 'Terminal: {0}'
+        TerminalProfileUnavailable    = 'Terminal profile name unavailable'
+        UnknownState                  = 'Unknown state'
+        WslVersion                    = 'WSL {0}'
+        UnknownWslVersion             = 'Unknown WSL version'
+        WslNameLabel                  = '     WSL name: {0}'
+        VhdxLabel                     = '     VHDX: {0}'
+        SizeLabel                     = '     Size: {0}'
+        SelectTargets                 = 'Select targets (numbers such as 1,3; name; A=all; Q=quit)'
+        NumberOutOfRange              = 'Number {0} is out of range.'
+        DistributionNotFound          = 'Distribution "{0}" was not found.'
+        DiskPartReturnedError         = 'DiskPart returned an error.'
+        ExitCode                      = 'Exit code {0}'
+        DiskPartInvokeFailed          = 'Failed to invoke DiskPart.'
+        Retry                         = '  Waiting for the VHDX to be released; retrying ({0}/{1}).'
+        CompactConfirmed              = 'Confirmed that DiskPart compacted and detached the VHDX successfully.'
+        AttachSuccessEvent            = 'Attach success event'
+        CompactSuccessEvent           = 'Compact success event'
+        DetachSuccessEvent            = 'Detach success event'
+        ListSeparator                 = ', '
+        CompletionUnconfirmed         = 'Could not confirm DiskPart completion: {0}'
+        DiskPartExecutionFailed       = 'DiskPart execution failed: {0}; missing completion events: {1}'
+        EventLogUnavailable           = 'Exit code 0 (VHDMP event log was unavailable)'
+        DiskPartCouldNotExecute       = 'DiskPart could not be executed.'
+        InvalidParameters             = 'Do not combine -All, -List, and -Distro.'
+        Title                         = 'WSL VHDX Compactor'
+        Subtitle                      = 'Compacts WSL 2 ext4.vhdx files with DiskPart.'
+        NoTargets                     = 'No WSL distributions with ext4.vhdx were found.'
+        Canceled                      = 'Operation canceled.'
+        ExecutionTargets              = 'Execution targets:'
+        ExecutionTargetItem           = '  - {0}: {1}'
+        DryRun                        = 'Dry run: no changes were made.'
+        AdminRequired                 = 'DiskPart requires administrator privileges. Start PowerShell as administrator and try again.'
+        StopWarning                   = 'Running this operation will stop all WSL distributions first.'
+        RunPrompt                     = 'Run it? [y/N]'
+        ShuttingDown                  = 'Shutting down WSL...'
+        ShutdownFailed                = 'wsl --shutdown failed (exit code {0}).'
+        ShutdownCompleted             = 'WSL shutdown completed. Waiting {0} seconds for VHDX release...'
+        PreviousDiskPartWait          = 'Waiting {0} seconds for the previous DiskPart operation to finish...'
+        Compressing                   = 'Compressing...'
+        BeforeReadFailed              = 'Could not read the VHDX before processing.'
+        UnexpectedCompactionFailure   = 'The compaction operation failed unexpectedly.'
+        Failed                        = 'Failed: {0}'
+        NativeDetails                 = 'See the Microsoft-Windows-VHDMP-Operational event log for native operation details.'
+        AfterReadFailed               = 'Could not read the VHDX size after processing.'
+        Verified                      = '  Verified: {0}'
+        Completed                     = '  Completed.'
+        SizeChange                    = '  Size: {0} -> {1}'
+        SummaryFailed                 = '{0} target(s), {1} failed.'
+        AllSucceeded                  = 'All target distributions were processed successfully.'
+        UnregisteredVhdx              = 'Unregistered VHDX ({0})'
+        Running                       = 'Running'
+        Stopped                       = 'Stopped'
+        Installing                   = 'Installing'
+        Unknown                      = 'Unknown'
+    }
+    ja = @{
+        ScriptPathMissing             = 'スクリプトのパスを取得できないため、管理者として再起動できません。'
+        ElevationCanceled             = 'ユーザーが管理者権限への昇格をキャンセルしました。'
+        ElevationFailedWin32          = '管理者としての再起動に失敗しました（Win32エラー {0}）。'
+        ElevationFailed               = '管理者としての再起動に失敗しました。'
+        DetectedTargets               = '検出した対象:'
+        TerminalLabel                 = 'Terminal: {0}'
+        TerminalProfileUnavailable    = 'Terminal設定名なし'
+        UnknownState                  = '状態不明'
+        WslVersion                    = 'WSL {0}'
+        UnknownWslVersion             = 'WSLバージョン不明'
+        WslNameLabel                  = '     WSL名: {0}'
+        VhdxLabel                     = '     VHDX: {0}'
+        SizeLabel                     = '     サイズ: {0}'
+        SelectTargets                 = '対象を選択してください（番号、例: 1,3、名前、A=全て、Q=終了）'
+        NumberOutOfRange              = '番号 {0} は範囲外です。'
+        DistributionNotFound          = 'ディストロ名「{0}」が見つかりません。'
+        DiskPartReturnedError         = 'DiskPartがエラーを返しました。'
+        ExitCode                      = '終了コード {0}'
+        DiskPartInvokeFailed          = 'DiskPartを実行できませんでした。'
+        Retry                         = '  VHDXの解放を待って再試行します（{0}/{1}）。'
+        CompactConfirmed              = 'DiskPartの圧縮成功と切り離し成功を確認しました。'
+        AttachSuccessEvent            = 'Attach成功イベント'
+        CompactSuccessEvent           = 'Compact成功イベント'
+        DetachSuccessEvent            = 'Detach成功イベント'
+        ListSeparator                 = '、'
+        CompletionUnconfirmed         = 'DiskPartの完了を確認できませんでした: {0}'
+        DiskPartExecutionFailed       = 'DiskPartの実行に失敗しました: {0}; 完了イベント不足: {1}'
+        EventLogUnavailable           = '終了コード 0（VHDMPイベントログは利用できませんでした）'
+        DiskPartCouldNotExecute       = 'DiskPartを実行できませんでした。'
+        InvalidParameters             = '-All、-List、-Distroは同時に指定できません。'
+        Title                         = 'WSL VHDX コンパクター'
+        Subtitle                      = 'WSL 2のext4.vhdxをDiskPartで圧縮します。'
+        NoTargets                     = 'ext4.vhdxを持つWSLディストロが見つかりませんでした。'
+        Canceled                      = '処理をキャンセルしました。'
+        ExecutionTargets              = '実行対象:'
+        ExecutionTargetItem           = '  - {0}: {1}'
+        DryRun                        = 'dry-runのため、変更は行いません。'
+        AdminRequired                 = 'DiskPartを実行するには管理者権限が必要です。管理者としてPowerShellを起動して再実行してください。'
+        StopWarning                   = '実行すると、最初に全てのWSLディストロを停止します。'
+        RunPrompt                     = '実行しますか？ [y/N]'
+        ShuttingDown                  = 'WSLをシャットダウンしています...'
+        ShutdownFailed                = 'wsl --shutdownに失敗しました（終了コード {0}）。'
+        ShutdownCompleted             = 'WSLのシャットダウンが完了しました。VHDXの解放を{0}秒待機しています...'
+        PreviousDiskPartWait          = '前のDiskPart処理の終了を待機しています（{0}秒）...'
+        Compressing                   = '圧縮しています...'
+        BeforeReadFailed              = '開始前にVHDXを読み取れませんでした。'
+        UnexpectedCompactionFailure   = '圧縮処理で予期しないエラーが発生しました。'
+        Failed                        = '失敗: {0}'
+        NativeDetails                 = 'ネイティブ処理の詳細はMicrosoft-Windows-VHDMP-Operationalイベントログを確認してください。'
+        AfterReadFailed               = '処理後にVHDXのサイズを確認できませんでした。'
+        Verified                      = '  確認: {0}'
+        Completed                     = '  完了しました。'
+        SizeChange                    = '  サイズ: {0} → {1}'
+        SummaryFailed                 = '{0}件中{1}件の処理に失敗しました。'
+        AllSucceeded                  = '全ての対象ディストロの圧縮が完了しました。'
+        UnregisteredVhdx              = '未登録 VHDX ({0})'
+        Running                       = '実行中'
+        Stopped                       = '停止'
+        Installing                   = 'インストール中'
+        Unknown                      = '状態不明'
+    }
+}
+
+function Get-Message {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Key
+    )
+
+    $message = $script:Messages[$script:UiLanguage][$Key]
+
+    if ($null -eq $message) {
+        $message = $script:Messages.en[$Key]
+    }
+
+    return [string] $message
+}
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -156,7 +390,7 @@ function Invoke-NativeCommandCapture {
 
 function Start-ElevatedSelf {
     if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
-        throw 'スクリプトのパスを取得できないため、管理者として再起動できません。'
+        throw (Get-Message 'ScriptPathMissing')
     }
 
     $hostPath = $null
@@ -215,16 +449,16 @@ function Start-ElevatedSelf {
     }
     catch [System.ComponentModel.Win32Exception] {
         if ($_.Exception.NativeErrorCode -eq 1223) {
-            Write-Error 'ユーザーが管理者権限への昇格をキャンセルしました。'
+            Write-Error (Get-Message 'ElevationCanceled')
         }
         else {
-            Write-Error ('管理者としての再起動に失敗しました: {0}' -f $_.Exception.Message)
+            Write-Error ((Get-Message 'ElevationFailedWin32') -f $_.Exception.NativeErrorCode)
         }
 
         return 1
     }
     catch {
-        Write-Error ('管理者としての再起動に失敗しました: {0}' -f $_.Exception.Message)
+        Write-Error (Get-Message 'ElevationFailed')
         return 1
     }
 }
@@ -521,6 +755,24 @@ function Get-TerminalProfiles {
     return @($profiles)
 }
 
+function Convert-WslState {
+    param(
+        [AllowNull()]
+        [string] $State
+    )
+
+    if ([string]::IsNullOrWhiteSpace($State)) {
+        return $null
+    }
+
+    switch -Regex ($State.Trim()) {
+        '^(?i:running)$|^(実行中|起動中)$' { return (Get-Message 'Running') }
+        '^(?i:stopped)$|^(停止|停止中|停止済み)$' { return (Get-Message 'Stopped') }
+        '^(?i:installing)$|^インストール中$' { return (Get-Message 'Installing') }
+        default { return (Get-Message 'Unknown') }
+    }
+}
+
 function Get-WslStatuses {
     try {
         $nativeResult = Invoke-NativeCommandCapture -FilePath 'wsl.exe' -ArgumentList @('--list', '--verbose')
@@ -543,7 +795,7 @@ function Get-WslStatuses {
             ) {
                 $result += [pscustomobject] @{
                     Name    = $Matches.Name.Trim()
-                    State   = $Matches.State
+                    State   = Convert-WslState $Matches.State
                     Version = [int] $Matches.Version
                 }
             }
@@ -654,7 +906,7 @@ function Get-WslDistributions {
             }
 
             $folder = Split-Path $file.DirectoryName -Leaf
-            $unregisteredName = '未登録 VHDX ({0})' -f $folder
+            $unregisteredName = (Get-Message 'UnregisteredVhdx') -f $folder
 
             $items += [pscustomobject] @{
                 WslName      = $unregisteredName
@@ -699,42 +951,42 @@ function Show-Distributions {
         [object[]] $Items
     )
 
-    Write-Host '検出した対象:'
+    Write-Host (Get-Message 'DetectedTargets')
     Write-Host ''
 
     for ($i = 0; $i -lt $Items.Count; $i++) {
         $item = $Items[$i]
 
         if ($item.TerminalName) {
-            $terminal = 'Terminal: {0}' -f $item.TerminalName
+            $terminal = (Get-Message 'TerminalLabel') -f $item.TerminalName
         }
         else {
-            $terminal = 'Terminal設定名なし'
+            $terminal = Get-Message 'TerminalProfileUnavailable'
         }
 
         if ($item.State) {
             $state = $item.State
         }
         else {
-            $state = '状態不明'
+            $state = Get-Message 'UnknownState'
         }
 
         if ($item.Version) {
-            $version = 'WSL {0}' -f $item.Version
+            $version = (Get-Message 'WslVersion') -f $item.Version
         }
         else {
-            $version = 'WSLバージョン不明'
+            $version = Get-Message 'UnknownWslVersion'
         }
 
         Write-Host ('  {0}. {1}' -f ($i + 1), $item.DisplayName)
 
         if ($item.DisplayName -ine $item.WslName) {
-            Write-Host ('     WSL名: {0}' -f $item.WslName)
+            Write-Host ((Get-Message 'WslNameLabel') -f $item.WslName)
         }
 
         Write-Host ('     {0} / {1} / {2}' -f $terminal, $state, $version)
-        Write-Host ('     VHDX: {0}' -f $item.VhdxPath)
-        Write-Host ('     サイズ: {0}' -f (Format-Bytes $item.SizeBytes))
+        Write-Host ((Get-Message 'VhdxLabel') -f $item.VhdxPath)
+        Write-Host ((Get-Message 'SizeLabel') -f (Format-Bytes $item.SizeBytes))
         Write-Host ''
     }
 }
@@ -759,7 +1011,7 @@ function Resolve-Selection {
 
     while ($true) {
         if ($expanded.Count -eq 0) {
-            $inputValue = Read-Host '対象を選択してください（番号、1,3、名前、A=全て、Q=終了）'
+            $inputValue = Read-Host (Get-Message 'SelectTargets')
 
             if ($inputValue -match '^(?i:q)$') {
                 return @()
@@ -784,7 +1036,7 @@ function Resolve-Selection {
 
             if ([int]::TryParse($selector, [ref] $number)) {
                 if ($number -lt 1 -or $number -gt $Items.Count) {
-                    Write-Host ('番号 {0} は範囲外です。' -f $number)
+                    Write-Host ((Get-Message 'NumberOutOfRange') -f $number)
                     $valid = $false
                     break
                 }
@@ -801,7 +1053,7 @@ function Resolve-Selection {
             )
 
             if ($matches.Count -eq 0) {
-                Write-Host ('ディストロ名「{0}」が見つかりません。' -f $selector)
+                Write-Host ((Get-Message 'DistributionNotFound') -f $selector)
                 $valid = $false
                 break
             }
@@ -853,10 +1105,10 @@ function Invoke-DiskPartCommands {
         $hasError = $errorText -match '(?i)error|failed|failure|cannot|could not|not found|access is denied|エラー|失敗|見つかりません|アクセスが拒否'
 
         if ($hasError) {
-            $message = 'DiskPartがエラーを返しました。'
+            $message = Get-Message 'DiskPartReturnedError'
         }
         else {
-            $message = '終了コード {0}' -f $nativeResult.ExitCode
+            $message = (Get-Message 'ExitCode') -f $nativeResult.ExitCode
         }
 
         return [pscustomobject] @{
@@ -868,7 +1120,7 @@ function Invoke-DiskPartCommands {
     catch {
         return [pscustomobject] @{
             Succeeded = $false
-            Message   = $_.Exception.Message
+            Message   = Get-Message 'DiskPartInvokeFailed'
             Output    = ''
         }
     }
@@ -961,13 +1213,13 @@ function Invoke-DiskPartCompact {
 
     $lastResult = [pscustomobject] @{
         Succeeded = $false
-        Message   = 'DiskPartを実行できませんでした。'
+        Message   = Get-Message 'DiskPartCouldNotExecute'
         Output    = ''
     }
 
     for ($attempt = 1; $attempt -le $DiskPartMaxAttempts; $attempt++) {
         if ($attempt -gt 1) {
-            Write-Host ('  VHDXの解放を待って再試行します（{0}/{1}）。' -f $attempt, $DiskPartMaxAttempts)
+            Write-Host ((Get-Message 'Retry') -f $attempt, $DiskPartMaxAttempts)
             Start-Sleep -Seconds $DiskPartScriptWaitSeconds
         }
 
@@ -979,7 +1231,7 @@ function Invoke-DiskPartCompact {
             if ($eventValidation.AttachSuccess -and $eventValidation.CompactSuccess -and $eventValidation.DetachSuccess) {
                 return [pscustomobject] @{
                     Succeeded = $true
-                    Message   = 'DiskPartの圧縮成功と切り離し成功を確認しました。'
+                    Message   = Get-Message 'CompactConfirmed'
                     Output    = $diskPartResult.Output
                 }
             }
@@ -987,22 +1239,22 @@ function Invoke-DiskPartCompact {
             $missing = @()
 
             if (-not $eventValidation.AttachSuccess) {
-                $missing += 'Attach成功イベント'
+                $missing += Get-Message 'AttachSuccessEvent'
             }
 
             if (-not $eventValidation.CompactSuccess) {
-                $missing += 'Compact成功イベント'
+                $missing += Get-Message 'CompactSuccessEvent'
             }
 
             if (-not $eventValidation.DetachSuccess) {
-                $missing += 'Detach成功イベント'
+                $missing += Get-Message 'DetachSuccessEvent'
             }
 
             if ($diskPartResult.Succeeded) {
-                $message = 'DiskPartの完了を確認できませんでした: {0}' -f ($missing -join '、')
+                $message = (Get-Message 'CompletionUnconfirmed') -f ($missing -join (Get-Message 'ListSeparator'))
             }
             else {
-                $message = 'DiskPartの実行に失敗しました: {0} 完了イベント不足: {1}' -f $diskPartResult.Message, ($missing -join '、')
+                $message = (Get-Message 'DiskPartExecutionFailed') -f $diskPartResult.Message, ($missing -join (Get-Message 'ListSeparator'))
             }
 
             $lastResult = [pscustomobject] @{
@@ -1014,7 +1266,7 @@ function Invoke-DiskPartCompact {
         elseif ($diskPartResult.Succeeded) {
             return [pscustomobject] @{
                 Succeeded = $true
-                Message   = '終了コード 0（VHDMPイベントログは利用できませんでした）'
+                Message   = Get-Message 'EventLogUnavailable'
                 Output    = $diskPartResult.Output
             }
         }
@@ -1039,7 +1291,7 @@ if (
     ($All -and $distroCount -gt 0) -or
     ($List -and ($All -or $distroCount -gt 0))
 ) {
-    throw '-All、-List、-Distroは同時に指定できません。'
+    throw (Get-Message 'InvalidParameters')
 }
 
 if (
@@ -1051,14 +1303,14 @@ if (
     exit (Start-ElevatedSelf)
 }
 
-Write-Host 'WSL VHDX コンパクター'
-Write-Host 'WSL 2のext4.vhdxをDiskPartで圧縮します。'
+Write-Host (Get-Message 'Title')
+Write-Host (Get-Message 'Subtitle')
 Write-Host ''
 
 $items = @(Get-WslDistributions)
 
 if ($items.Count -eq 0) {
-    Write-Host 'ext4.vhdxを持つWSLディストロが見つかりませんでした。'
+    Write-Host (Get-Message 'NoTargets')
     exit 1
 }
 
@@ -1071,51 +1323,47 @@ if ($List) {
 $selected = @(Resolve-Selection -Items $items -Selectors @($Distro) -SelectAll:$All)
 
 if ($selected.Count -eq 0) {
-    Write-Host '処理をキャンセルしました。'
+    Write-Host (Get-Message 'Canceled')
     exit 0
 }
 
-Write-Host '実行対象:'
+Write-Host (Get-Message 'ExecutionTargets')
 $selected | ForEach-Object {
-    Write-Host ('  - {0}: {1}' -f $_.DisplayName, $_.VhdxPath)
+    Write-Host ((Get-Message 'ExecutionTargetItem') -f $_.DisplayName, $_.VhdxPath)
 }
 
 if ($DryRun) {
-    Write-Host 'dry-runのため、変更は行いません。'
+    Write-Host (Get-Message 'DryRun')
     exit 0
 }
 
 if (-not (Test-Administrator)) {
-    Write-Error 'DiskPartを実行するには管理者権限が必要です。管理者としてPowerShellを起動して再実行してください。'
+    Write-Error (Get-Message 'AdminRequired')
     exit 1
 }
 
 Write-Host ''
-Write-Host '実行すると、最初に全てのWSLディストロを停止します。'
+Write-Host (Get-Message 'StopWarning')
 
 if (-not $Yes) {
-    $answer = Read-Host '実行しますか？ [y/N]'
+    $answer = Read-Host (Get-Message 'RunPrompt')
 
     if ($answer -notmatch '^(?i:y|yes)$') {
-        Write-Host '処理をキャンセルしました。'
+        Write-Host (Get-Message 'Canceled')
         exit 0
     }
 }
 
-Write-Host 'WSLをシャットダウンしています...'
+Write-Host (Get-Message 'ShuttingDown')
 $shutdownOutput = (& wsl.exe --shutdown 2>&1 | Out-String).Trim()
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error 'wsl --shutdownに失敗しました。'
-
-    if ($shutdownOutput) {
-        Write-Error $shutdownOutput
-    }
+    Write-Error ((Get-Message 'ShutdownFailed') -f $LASTEXITCODE)
 
     exit 1
 }
 
-Write-Host ('WSLのシャットダウンが完了しました。VHDXの解放を{0}秒待機しています...' -f $DiskPartScriptWaitSeconds)
+Write-Host ((Get-Message 'ShutdownCompleted') -f $DiskPartScriptWaitSeconds)
 Start-Sleep -Seconds $DiskPartScriptWaitSeconds
 
 $failed = 0
@@ -1123,19 +1371,19 @@ $processedCount = 0
 
 foreach ($item in $selected) {
     if ($processedCount -gt 0) {
-        Write-Host ('前のDiskPart処理の終了を待機しています（{0}秒）...' -f $DiskPartScriptWaitSeconds)
+        Write-Host ((Get-Message 'PreviousDiskPartWait') -f $DiskPartScriptWaitSeconds)
         Start-Sleep -Seconds $DiskPartScriptWaitSeconds
     }
 
     $processedCount++
-    Write-Host ('[{0}] 圧縮しています...' -f $item.DisplayName)
+    Write-Host ('[{0}] {1}' -f $item.DisplayName, (Get-Message 'Compressing'))
 
     try {
         $before = (Get-Item -LiteralPath $item.VhdxPath -ErrorAction Stop).Length
     }
     catch {
         $failed++
-        Write-Error ('開始前にVHDXを読み取れませんでした: {0}' -f $_.Exception.Message)
+        Write-Error (Get-Message 'BeforeReadFailed')
         continue
     }
 
@@ -1145,18 +1393,15 @@ foreach ($item in $selected) {
     catch {
         $result = [pscustomobject] @{
             Succeeded = $false
-            Message   = $_.Exception.Message
+            Message   = Get-Message 'UnexpectedCompactionFailure'
             Output    = ''
         }
     }
 
     if (-not $result.Succeeded) {
         $failed++
-        Write-Error ('失敗: {0}' -f $result.Message)
-
-        if ($result.Output) {
-            Write-Error $result.Output
-        }
+        Write-Error ((Get-Message 'Failed') -f $result.Message)
+        Write-Error (Get-Message 'NativeDetails')
 
         continue
     }
@@ -1166,22 +1411,22 @@ foreach ($item in $selected) {
     }
     catch {
         $failed++
-        Write-Error ('処理後にVHDXのサイズを確認できませんでした: {0}' -f $_.Exception.Message)
+        Write-Error (Get-Message 'AfterReadFailed')
         continue
     }
 
     if (-not [string]::IsNullOrWhiteSpace($result.Message)) {
-        Write-Host ('  確認: {0}' -f $result.Message)
+        Write-Host ((Get-Message 'Verified') -f $result.Message)
     }
 
-    Write-Host '  完了しました。'
-    Write-Host ('  サイズ: {0} → {1}' -f (Format-Bytes $before), (Format-Bytes $after))
+    Write-Host (Get-Message 'Completed')
+    Write-Host ((Get-Message 'SizeChange') -f (Format-Bytes $before), (Format-Bytes $after))
 }
 
 if ($failed -gt 0) {
-    Write-Error ('{0}件中{1}件の処理に失敗しました。' -f $selected.Count, $failed)
+    Write-Error ((Get-Message 'SummaryFailed') -f $selected.Count, $failed)
     exit 1
 }
 
-Write-Host '全ての対象ディストロの圧縮が完了しました。'
+Write-Host (Get-Message 'AllSucceeded')
 exit 0
