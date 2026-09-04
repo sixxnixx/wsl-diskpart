@@ -143,7 +143,9 @@ $script:Messages = @{
         ListSeparator                 = ', '
         CompletionUnconfirmed         = 'Could not confirm DiskPart completion: {0}'
         DiskPartExecutionFailed       = 'DiskPart execution failed: {0}; missing completion events: {1}'
-        EventLogUnavailable           = 'Exit code 0 (VHDMP event log was unavailable)'
+        EventLogUnavailable           = 'DiskPart exited with code 0, but the VHDMP event log was unavailable, so completion could not be verified.'
+        DetachUnconfirmed             = 'DiskPart detach completion could not be confirmed.'
+        DetachCleanupFailed           = 'Best-effort VHDX detach failed: {0}'
         DiskPartCouldNotExecute       = 'DiskPart could not be executed.'
         InvalidParameters             = 'Do not combine -All, -List, and -Distro.'
         Title                         = 'WSL VHDX Compactor'
@@ -205,7 +207,9 @@ $script:Messages = @{
         ListSeparator                 = '、'
         CompletionUnconfirmed         = 'DiskPartの完了を確認できませんでした: {0}'
         DiskPartExecutionFailed       = 'DiskPartの実行に失敗しました: {0}; 完了イベント不足: {1}'
-        EventLogUnavailable           = '終了コード 0（VHDMPイベントログは利用できませんでした）'
+        EventLogUnavailable           = 'DiskPartは終了コード0を返しましたが、VHDMPイベントログを利用できないため完了を確認できませんでした。'
+        DetachUnconfirmed             = 'DiskPartによる切り離し完了を確認できませんでした。'
+        DetachCleanupFailed           = 'VHDXの切り離し再試行に失敗しました: {0}'
         DiskPartCouldNotExecute       = 'DiskPartを実行できませんでした。'
         InvalidParameters             = '-All、-List、-Distroは同時に指定できません。'
         Title                         = 'WSL VHDX コンパクター'
@@ -433,10 +437,10 @@ function Start-ElevatedSelf {
         $rawArguments += '-DryRun'
     }
 
-    foreach ($name in @($Distro)) {
-        if ($null -ne $name) {
-            $rawArguments += @('-Distro', $name)
-        }
+    $distroArguments = @($Distro | Where-Object { $null -ne $_ })
+
+    if ($distroArguments.Count -gt 0) {
+        $rawArguments += @('-Distro', ($distroArguments -join ','))
     }
 
     $argumentString = ($rawArguments | ForEach-Object {
@@ -449,16 +453,16 @@ function Start-ElevatedSelf {
     }
     catch [System.ComponentModel.Win32Exception] {
         if ($_.Exception.NativeErrorCode -eq 1223) {
-            Write-Error (Get-Message 'ElevationCanceled')
+            Write-Error -Message (Get-Message 'ElevationCanceled') -ErrorAction Continue
         }
         else {
-            Write-Error ((Get-Message 'ElevationFailedWin32') -f $_.Exception.NativeErrorCode)
+            Write-Error -Message ((Get-Message 'ElevationFailedWin32') -f $_.Exception.NativeErrorCode) -ErrorAction Continue
         }
 
         return 1
     }
     catch {
-        Write-Error (Get-Message 'ElevationFailed')
+        Write-Error -Message (Get-Message 'ElevationFailed') -ErrorAction Continue
         return 1
     }
 }
@@ -1137,10 +1141,13 @@ function Get-VhdmpEventValidation {
         [string] $VhdxPath,
 
         [Parameter(Mandatory)]
-        [datetime] $StartTime
+        [datetime] $StartTime,
+
+        [switch] $DetachOnly
     )
 
     $logName = 'Microsoft-Windows-VHDMP-Operational'
+    $eventIds = if ($DetachOnly) { @(2) } else { @(1, 2, 51) }
     $result = [pscustomobject] @{
         QuerySucceeded = $false
         AttachSuccess  = $false
@@ -1159,17 +1166,42 @@ function Get-VhdmpEventValidation {
         $events = @(
             Get-WinEvent -FilterHashtable @{
                 LogName   = $logName
-                Id        = @(1, 2, 51)
+                Id        = $eventIds
                 StartTime = $StartTime
                 EndTime   = (Get-Date)
             } -ErrorAction Stop |
-                Where-Object { $_.Message -like ('*{0}*' -f $VhdxPath) }
+                Where-Object {
+                    ([string] $_.Message).IndexOf($VhdxPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                } |
+                Sort-Object RecordId
         )
 
         $result.QuerySucceeded = $true
-        $result.AttachSuccess = @($events | Where-Object { $_.Id -eq 1 }).Count -gt 0
-        $result.CompactSuccess = @($events | Where-Object { $_.Id -eq 51 }).Count -gt 0
-        $result.DetachSuccess = @($events | Where-Object { $_.Id -eq 2 }).Count -gt 0
+
+        if ($DetachOnly) {
+            $result.DetachSuccess = @($events | Where-Object { $_.Id -eq 2 }).Count -gt 0
+            return $result
+        }
+
+        $attachEvent = $events | Where-Object { $_.Id -eq 1 } | Select-Object -First 1
+
+        if ($null -ne $attachEvent) {
+            $result.AttachSuccess = $true
+            $compactEvent = $events |
+                Where-Object { $_.Id -eq 51 -and $_.RecordId -gt $attachEvent.RecordId } |
+                Select-Object -First 1
+
+            if ($null -ne $compactEvent) {
+                $result.CompactSuccess = $true
+                $detachEvent = $events |
+                    Where-Object { $_.Id -eq 2 -and $_.RecordId -gt $compactEvent.RecordId } |
+                    Select-Object -First 1
+
+                if ($null -ne $detachEvent) {
+                    $result.DetachSuccess = $true
+                }
+            }
+        }
     }
     catch {
         if ($_.Exception.Message -match '(?i)no events were found|イベントが見つかりません') {
@@ -1187,12 +1219,27 @@ function Invoke-DiskPartDetachBestEffort {
     )
 
     $selectCommand = 'select vdisk file="{0}"' -f $VhdxPath
-
-    return Invoke-DiskPartCommands -Commands @(
+    $startedAt = Get-Date
+    $diskPartResult = Invoke-DiskPartCommands -Commands @(
         $selectCommand
         'detach vdisk noerr'
         'exit'
     ) -VhdxPath $VhdxPath
+    $eventValidation = Get-VhdmpEventValidation -VhdxPath $VhdxPath -StartTime $startedAt -DetachOnly
+
+    if ($diskPartResult.Succeeded -and $eventValidation.QuerySucceeded -and $eventValidation.DetachSuccess) {
+        return $diskPartResult
+    }
+
+    if (-not $diskPartResult.Succeeded) {
+        return $diskPartResult
+    }
+
+    return [pscustomobject] @{
+        Succeeded = $false
+        Message   = Get-Message 'DetachUnconfirmed'
+        Output    = $diskPartResult.Output
+    }
 }
 
 function Invoke-DiskPartCompact {
@@ -1218,11 +1265,7 @@ function Invoke-DiskPartCompact {
     }
 
     for ($attempt = 1; $attempt -le $DiskPartMaxAttempts; $attempt++) {
-        if ($attempt -gt 1) {
-            Write-Host ((Get-Message 'Retry') -f $attempt, $DiskPartMaxAttempts)
-            Start-Sleep -Seconds $DiskPartScriptWaitSeconds
-        }
-
+        $stopRetrying = $false
         $startedAt = Get-Date
         $diskPartResult = Invoke-DiskPartCommands -Commands $commands -VhdxPath $VhdxPath
         $eventValidation = Get-VhdmpEventValidation -VhdxPath $VhdxPath -StartTime $startedAt
@@ -1264,21 +1307,41 @@ function Invoke-DiskPartCompact {
             }
         }
         elseif ($diskPartResult.Succeeded) {
-            return [pscustomobject] @{
-                Succeeded = $true
+            $lastResult = [pscustomobject] @{
+                Succeeded = $false
                 Message   = Get-Message 'EventLogUnavailable'
                 Output    = $diskPartResult.Output
             }
+            $stopRetrying = $true
         }
         else {
             $lastResult = $diskPartResult
         }
 
-        $cleanupNeeded = -not $eventValidation.QuerySucceeded -or $eventValidation.AttachSuccess
+        $cleanupNeeded =
+            -not $eventValidation.QuerySucceeded -or
+            ($eventValidation.AttachSuccess -and -not $eventValidation.DetachSuccess)
+        $willRetry = $attempt -lt $DiskPartMaxAttempts -and -not $stopRetrying
 
-        if ($attempt -lt $DiskPartMaxAttempts -and $cleanupNeeded) {
+        if ($willRetry) {
+            Write-Host ((Get-Message 'Retry') -f ($attempt + 1), $DiskPartMaxAttempts)
+        }
+
+        if ($cleanupNeeded -or $willRetry) {
             Start-Sleep -Seconds $DiskPartScriptWaitSeconds
-            Invoke-DiskPartDetachBestEffort -VhdxPath $VhdxPath | Out-Null
+        }
+
+        if ($cleanupNeeded) {
+            $cleanupResult = Invoke-DiskPartDetachBestEffort -VhdxPath $VhdxPath
+
+            if (-not $cleanupResult.Succeeded) {
+                $lastResult.Message = '{0} {1}' -f $lastResult.Message, ((Get-Message 'DetachCleanupFailed') -f $cleanupResult.Message)
+                $stopRetrying = $true
+            }
+        }
+
+        if ($stopRetrying) {
+            break
         }
     }
 
@@ -1338,7 +1401,7 @@ if ($DryRun) {
 }
 
 if (-not (Test-Administrator)) {
-    Write-Error (Get-Message 'AdminRequired')
+    Write-Error -Message (Get-Message 'AdminRequired') -ErrorAction Continue
     exit 1
 }
 
@@ -1358,7 +1421,7 @@ Write-Host (Get-Message 'ShuttingDown')
 $shutdownOutput = (& wsl.exe --shutdown 2>&1 | Out-String).Trim()
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error ((Get-Message 'ShutdownFailed') -f $LASTEXITCODE)
+    Write-Error -Message ((Get-Message 'ShutdownFailed') -f $LASTEXITCODE) -ErrorAction Continue
 
     exit 1
 }
@@ -1383,7 +1446,7 @@ foreach ($item in $selected) {
     }
     catch {
         $failed++
-        Write-Error (Get-Message 'BeforeReadFailed')
+        Write-Error -Message (Get-Message 'BeforeReadFailed') -ErrorAction Continue
         continue
     }
 
@@ -1400,8 +1463,8 @@ foreach ($item in $selected) {
 
     if (-not $result.Succeeded) {
         $failed++
-        Write-Error ((Get-Message 'Failed') -f $result.Message)
-        Write-Error (Get-Message 'NativeDetails')
+        Write-Error -Message ((Get-Message 'Failed') -f $result.Message) -ErrorAction Continue
+        Write-Error -Message (Get-Message 'NativeDetails') -ErrorAction Continue
 
         continue
     }
@@ -1411,7 +1474,7 @@ foreach ($item in $selected) {
     }
     catch {
         $failed++
-        Write-Error (Get-Message 'AfterReadFailed')
+        Write-Error -Message (Get-Message 'AfterReadFailed') -ErrorAction Continue
         continue
     }
 
@@ -1424,7 +1487,7 @@ foreach ($item in $selected) {
 }
 
 if ($failed -gt 0) {
-    Write-Error ((Get-Message 'SummaryFailed') -f $selected.Count, $failed)
+    Write-Error -Message ((Get-Message 'SummaryFailed') -f $selected.Count, $failed) -ErrorAction Continue
     exit 1
 }
 
