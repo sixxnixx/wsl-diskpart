@@ -16,7 +16,7 @@ Fixed runtime messages follow the OS UI language. Japanese (`ja-*`) displays Jap
     # Display detected targets only
     .\wsl-diskpart.ps1 -List
 
-    # Process all targets
+    # Process all registered targets
     .\wsl-diskpart.ps1 -All
 
     # Specify a Windows Terminal display name or WSL name
@@ -42,7 +42,7 @@ VHDX paths are searched in the following order.
 
 Display names are matched against `profiles.list[].name` in Windows Terminal's `settings.json`. If no match is found, the WSL `DistributionName` is used. JSONC comments and trailing commas are supported.
 
-VHDX files that are not registered in the registry are displayed as `Unregistered VHDX`.
+VHDX files that are not registered in the registry are displayed as `Unregistered VHDX`. `-All` and interactive `A` exclude them; select them explicitly by number or name. Only local `.vhdx` files without reparse points are eligible. The utility verifies the discovered file identity again before processing.
 
 ## DiskPart Commands
 
@@ -58,6 +58,13 @@ After target confirmation, the utility creates a temporary script for each distr
 All DiskPart commands for a target are executed in one script. The temporary script loaded with `/s` is generated using the system ANSI code page supported by DiskPart. The utility waits 15 seconds after shutting down WSL and between multiple distribution operations so that the VHDX can be released. If the file is in use, it retries up to three times and verifies attach, compact, and detach completion in the VHDMP event log.
 
 ## Notes
+
+Development checks (no WSL shutdown or DiskPart execution):
+
+    Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+    Invoke-Pester -Script .\tests\wsl-diskpart.Tests.ps1
+
+The analyzer settings exclude only `PSAvoidUsingWriteHost`, because this utility intentionally uses host output for its interactive interface. The regression tests mock DiskPart and event queries; they do not replace an elevated compaction integration test.
 
 - `wsl --shutdown` stops all running WSL distributions.
 - Close applications that use WSL, such as Docker Desktop and WSL tabs in Windows Terminal, before running the utility.
@@ -83,7 +90,7 @@ PowerShellでプロジェクトフォルダへ移動し、次のように実行�
     # 検出結果だけを表示
     .\wsl-diskpart.ps1 -List
 
-    # すべての対象を処理
+    # 登録済みの対象をすべて処理
     .\wsl-diskpart.ps1 -All
 
     # Windows Terminalの表示名またはWSL名で指定
@@ -109,7 +116,7 @@ VHDXのパスは次の順番で探索します。
 
 表示名はWindows Terminalの`settings.json`にある`profiles.list[].name`と照合します。照合できない場合はWSLの`DistributionName`を使用します。JSONCのコメントと末尾カンマにも対応しています。
 
-レジストリに登録されていないVHDXは「未登録 VHDX」として表示します。
+レジストリに登録されていないVHDXは「未登録 VHDX」として表示します。`-All`と対話選択の`A`からは除外するため、処理する場合は番号または名前で明示的に選択してください。対象はreparse pointを含まないローカルの`.vhdx`ファイルに限定し、処理前に検出時と同じファイルであることを再確認します。
 
 ## 実行するDiskPartコマンド
 
@@ -125,6 +132,13 @@ VHDXのパスは次の順番で探索します。
 DiskPartの各コマンドは1つのスクリプトで実行します。`/s`で読み込ませる一時スクリプトは、DiskPartが扱えるシステムANSIコードページで生成します。WSLの停止後と複数ディストロの処理間には、VHDXの解放を待つため15秒の待機を入れます。ファイルが使用中の場合は最大3回まで再試行し、VHDMPイベントログでアタッチ、圧縮、デタッチの完了を確認します。
 
 ## 注意事項
+
+開発時の検証（WSL停止・DiskPart実行なし）:
+
+    Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+    Invoke-Pester -Script .\tests\wsl-diskpart.Tests.ps1
+
+静的解析では、対話画面の表示に使用する`PSAvoidUsingWriteHost`だけを設定で除外しています。回帰テストではDiskPartとイベント取得をモック化しているため、管理者権限での実圧縮の結合テストは別途必要です。
 
 - `wsl --shutdown`により、起動中のすべてのWSLディストロが停止します。
 - Docker DesktopやWindows TerminalのWSLタブなど、WSLを使用するアプリは事前に終了してください。

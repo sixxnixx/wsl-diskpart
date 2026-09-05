@@ -52,6 +52,7 @@ namespace WslDiskPart {
         }
     }
     catch {
+        Write-Verbose 'Could not read the Windows user interface language from the native API.'
     }
 
     if ([string]::IsNullOrWhiteSpace($cultureName)) {
@@ -68,6 +69,7 @@ namespace WslDiskPart {
             }
         }
         catch {
+            Write-Verbose 'Could not read the cached Windows user interface language.'
         }
     }
 
@@ -80,6 +82,7 @@ namespace WslDiskPart {
             }
         }
         catch {
+            Write-Verbose 'Could not read the Windows user language list.'
         }
     }
 
@@ -88,6 +91,7 @@ namespace WslDiskPart {
             $cultureName = [string] ((Get-UICulture).Name)
         }
         catch {
+            Write-Verbose 'Could not read the PowerShell UI culture.'
         }
     }
 
@@ -96,6 +100,7 @@ namespace WslDiskPart {
             $cultureName = [string] ([Globalization.CultureInfo]::CurrentUICulture.Name)
         }
         catch {
+            Write-Verbose 'Could not read the current UI culture.'
         }
     }
 
@@ -104,6 +109,7 @@ namespace WslDiskPart {
             $cultureName = [string] ([Globalization.CultureInfo]::InstalledUICulture.Name)
         }
         catch {
+            Write-Verbose 'Could not read the installed UI culture.'
         }
     }
 
@@ -134,6 +140,7 @@ $script:Messages = @{
         SelectTargets                 = 'Select targets (numbers such as 1,3; name; A=all; Q=quit)'
         NumberOutOfRange              = 'Number {0} is out of range.'
         DistributionNotFound          = 'Distribution "{0}" was not found.'
+        AllSkipsUnregistered           = '  -All skips unregistered VHDX files. Select one explicitly by number or name to process it.'
         DiskPartReturnedError         = 'DiskPart returned an error.'
         ExitCode                      = 'Exit code {0}'
         DiskPartInvokeFailed          = 'Failed to invoke DiskPart.'
@@ -198,6 +205,7 @@ $script:Messages = @{
         SelectTargets                 = '対象を選択してください（番号、例: 1,3、名前、A=全て、Q=終了）'
         NumberOutOfRange              = '番号 {0} は範囲外です。'
         DistributionNotFound          = 'ディストロ名「{0}」が見つかりません。'
+        AllSkipsUnregistered           = '  -Allでは未登録VHDXを処理しません。処理する場合は番号または名前で明示的に選択してください。'
         DiskPartReturnedError         = 'DiskPartがエラーを返しました。'
         ExitCode                      = '終了コード {0}'
         DiskPartInvokeFailed          = 'DiskPartを実行できませんでした。'
@@ -268,7 +276,7 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Quote-ProcessArgument {
+function ConvertTo-ProcessArgument {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -344,12 +352,17 @@ function Invoke-NativeCommandCapture {
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('wsl-diskpart-native-{0}' -f ([Guid]::NewGuid().ToString('N')))
     $stdoutPath = $tempRoot + '.out'
     $stderrPath = $tempRoot + '.err'
+    $started = $false
 
     try {
+        if (-not (Test-NoReparsePointPath -Path ([IO.Path]::GetTempPath()))) {
+            throw 'The temporary directory is a reparse point or could not be validated.'
+        }
+
         $argumentString = @(
             $ArgumentList |
                 Where-Object { $null -ne $_ } |
-                ForEach-Object { Quote-ProcessArgument ([string] $_) }
+                ForEach-Object { ConvertTo-ProcessArgument ([string] $_) }
         ) -join ' '
 
         $process = Start-Process `
@@ -360,6 +373,7 @@ function Invoke-NativeCommandCapture {
             -PassThru `
             -RedirectStandardOutput $stdoutPath `
             -RedirectStandardError $stderrPath
+        $started = $true
 
         $stdout = ''
         $stderr = ''
@@ -376,6 +390,7 @@ function Invoke-NativeCommandCapture {
             ExitCode       = [int] $process.ExitCode
             StandardOutput = $stdout
             StandardError  = $stderr
+            Started        = $started
         }
     }
     catch {
@@ -383,6 +398,7 @@ function Invoke-NativeCommandCapture {
             ExitCode       = 1
             StandardOutput = ''
             StandardError  = $_.Exception.Message
+            Started        = $started
         }
     }
     finally {
@@ -395,6 +411,10 @@ function Invoke-NativeCommandCapture {
 }
 
 function Start-ElevatedSelf {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([int])]
+    param()
+
     if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
         throw (Get-Message 'ScriptPathMissing')
     }
@@ -405,6 +425,7 @@ function Start-ElevatedSelf {
         $hostPath = (Get-Process -Id $PID -ErrorAction Stop).Path
     }
     catch {
+        Write-Verbose 'Could not determine the current host process path.'
     }
 
     if ([string]::IsNullOrWhiteSpace($hostPath) -or -not (Test-Path -LiteralPath $hostPath)) {
@@ -446,10 +467,14 @@ function Start-ElevatedSelf {
     }
 
     $argumentString = ($rawArguments | ForEach-Object {
-        Quote-ProcessArgument ([string] $_)
+        ConvertTo-ProcessArgument ([string] $_)
     }) -join ' '
 
     try {
+        if (-not $PSCmdlet.ShouldProcess($hostPath, 'Relaunch the script as administrator')) {
+            return 0
+        }
+
         $child = Start-Process -FilePath $hostPath -ArgumentList $argumentString -Verb RunAs -Wait -PassThru
         return $child.ExitCode
     }
@@ -469,7 +494,7 @@ function Start-ElevatedSelf {
     }
 }
 
-function Normalize-Identifier {
+function ConvertTo-NormalizedIdentifier {
     param(
         [AllowNull()]
         [string] $Value
@@ -482,7 +507,7 @@ function Normalize-Identifier {
     return (($Value -replace '[{}-]', '').ToUpperInvariant())
 }
 
-function Normalize-PathValue {
+function ConvertTo-NormalizedPath {
     param(
         [AllowNull()]
         [string] $Value
@@ -506,6 +531,179 @@ function Normalize-PathValue {
     }
     catch {
         return $path
+    }
+}
+
+function Test-NoReparsePointPath {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    try {
+        $current = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $reparsePoint = [IO.FileAttributes]::ReparsePoint
+
+        while ($null -ne $current) {
+            if (($current.Attributes -band $reparsePoint) -ne 0) {
+                return $false
+            }
+
+            $parent = if ($current -is [IO.FileInfo]) { $current.Directory } else { $current.Parent }
+
+            if ($null -eq $parent -or [string]::Equals($parent.FullName, $current.FullName, [StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+
+            $current = $parent
+        }
+
+        return $true
+    }
+    catch {
+        Write-Verbose ('Could not validate the path for reparse points: {0}' -f $Path)
+        return $false
+    }
+}
+
+function Test-SafeVhdxPath {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    if ($Path -notmatch '^[A-Za-z]:\\' -or $Path -match '[\x00-\x1f"]' -or
+        $Path.Substring(2).Contains(':') -or [IO.Path]::GetExtension($Path) -ine '.vhdx') {
+        return $false
+    }
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    return Test-NoReparsePointPath -Path $Path
+}
+
+function Get-FileIdentity {
+    param(
+        [Parameter(Mandatory)]
+        [IO.FileStream] $Stream
+    )
+
+    if (-not ('WslDiskPart.NativeFileIdentity' -as [type])) {
+        [void] (Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace WslDiskPart {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ByHandleFileInformation {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    public static class NativeFileIdentity {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetFileInformationByHandle(
+            IntPtr handle,
+            out ByHandleFileInformation information);
+    }
+}
+'@)
+    }
+
+    $information = New-Object 'WslDiskPart.ByHandleFileInformation'
+    $handle = $Stream.SafeFileHandle.DangerousGetHandle()
+
+    if (-not [WslDiskPart.NativeFileIdentity]::GetFileInformationByHandle($handle, [ref] $information)) {
+        throw 'Could not read the file identity.'
+    }
+
+    return '{0:X8}:{1:X8}:{2:X8}' -f `
+        $information.VolumeSerialNumber, `
+        $information.FileIndexHigh, `
+        $information.FileIndexLow
+}
+
+function Get-FileIdentityAtPath {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $stream = $null
+
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        )
+
+        return Get-FileIdentity -Stream $stream
+    }
+    catch {
+        Write-Verbose ('Could not read the file identity: {0}' -f $Path)
+        return $null
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
+function Open-VhdxLease {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [AllowNull()]
+        [string] $ExpectedIdentity
+    )
+
+    if (-not (Test-SafeVhdxPath -Path $Path)) {
+        throw 'The VHDX path is not a regular, non-reparse .vhdx file.'
+    }
+
+    $stream = $null
+
+    try {
+        # Deny delete/rename while DiskPart resolves the same path. ReadWrite
+        # sharing still allows DiskPart to open the VHDX for compaction.
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite
+        )
+        $identity = Get-FileIdentity -Stream $stream
+
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedIdentity) -and $identity -ne $ExpectedIdentity) {
+            throw 'The VHDX file identity changed after target discovery.'
+        }
+
+        return [pscustomobject] @{
+            Identity = $identity
+            Length   = $stream.Length
+            Stream   = $stream
+        }
+    }
+    catch {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+
+        throw
     }
 }
 
@@ -543,16 +741,16 @@ function Find-VhdxPath {
 
     if (Test-Path -LiteralPath $wslRoot -PathType Container) {
         foreach ($directory in @(Get-ChildItem -LiteralPath $wslRoot -Directory -ErrorAction SilentlyContinue)) {
-            if ((Normalize-Identifier $directory.Name) -eq (Normalize-Identifier $RegistryId)) {
+            if ((ConvertTo-NormalizedIdentifier $directory.Name) -eq (ConvertTo-NormalizedIdentifier $RegistryId)) {
                 $candidates += Join-Path $directory.FullName 'ext4.vhdx'
             }
         }
     }
 
     foreach ($candidate in @($candidates | Select-Object -Unique)) {
-        $path = Normalize-PathValue $candidate
+        $path = ConvertTo-NormalizedPath $candidate
 
-        if ($null -ne $path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if ($null -ne $path -and (Test-SafeVhdxPath -Path $path)) {
             return $path
         }
     }
@@ -560,7 +758,7 @@ function Find-VhdxPath {
     return $null
 }
 
-function Remove-JsonComments {
+function ConvertTo-JsonComment {
     param(
         [Parameter(Mandatory)]
         [string] $Text
@@ -637,7 +835,7 @@ function Remove-JsonComments {
     return $builder.ToString()
 }
 
-function Remove-TrailingJsonCommas {
+function ConvertTo-TrailingJsonComma {
     param(
         [Parameter(Mandatory)]
         [string] $Text
@@ -691,7 +889,7 @@ function Remove-TrailingJsonCommas {
     return $builder.ToString()
 }
 
-function Get-TerminalProfiles {
+function Get-TerminalProfile {
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
     $packageRoot = Join-Path $localAppData 'Packages'
     $paths = @()
@@ -714,8 +912,8 @@ function Get-TerminalProfiles {
 
         try {
             $jsonText = [IO.File]::ReadAllText($path)
-            $jsonText = Remove-JsonComments $jsonText
-            $jsonText = Remove-TrailingJsonCommas $jsonText
+            $jsonText = ConvertTo-JsonComment $jsonText
+            $jsonText = ConvertTo-TrailingJsonComma $jsonText
             $json = $jsonText | ConvertFrom-Json
 
             if ($json.profiles -is [Array]) {
@@ -728,8 +926,8 @@ function Get-TerminalProfiles {
                 $entries = @()
             }
 
-            foreach ($profile in $entries) {
-                $name = [string] $profile.name
+            foreach ($terminalProfileEntry in $entries) {
+                $name = [string] $terminalProfileEntry.name
 
                 if ([string]::IsNullOrWhiteSpace($name)) {
                     continue
@@ -737,9 +935,9 @@ function Get-TerminalProfiles {
 
                 $item = [pscustomobject] @{
                     Name        = $name
-                    Guid        = [string] $profile.guid
-                    Source      = [string] $profile.source
-                    CommandLine = [string] $profile.commandline
+                    Guid        = [string] $terminalProfileEntry.guid
+                    Source      = [string] $terminalProfileEntry.source
+                    CommandLine = [string] $terminalProfileEntry.commandline
                 }
 
                 $duplicate = @(
@@ -755,6 +953,7 @@ function Get-TerminalProfiles {
             }
         }
         catch {
+            Write-Verbose ('Could not parse Windows Terminal settings: {0}' -f $path)
         }
     }
 
@@ -779,7 +978,7 @@ function Convert-WslState {
     }
 }
 
-function Get-WslStatuses {
+function Get-WslStatus {
     try {
         $nativeResult = Invoke-NativeCommandCapture -FilePath 'wsl.exe' -ArgumentList @('--list', '--verbose')
 
@@ -814,10 +1013,10 @@ function Get-WslStatuses {
     }
 }
 
-function Get-WslDistributions {
+function Get-WslDistribution {
     $registryRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
-    $profiles = @(Get-TerminalProfiles)
-    $statuses = @(Get-WslStatuses)
+    $profiles = @(Get-TerminalProfile)
+    $statuses = @(Get-WslStatus)
     $items = @()
     $knownPaths = @{}
 
@@ -831,7 +1030,7 @@ function Get-WslDistributions {
                     continue
                 }
 
-                $basePath = Normalize-PathValue ([string] $properties.BasePath)
+                $basePath = ConvertTo-NormalizedPath ([string] $properties.BasePath)
                 $vhdFileName = [string] $properties.VhdFileName
 
                 if ([string]::IsNullOrWhiteSpace($vhdFileName)) {
@@ -851,7 +1050,7 @@ function Get-WslDistributions {
                 if ($null -eq $terminalProfile) {
                     $terminalProfile = $profiles |
                         Where-Object {
-                            (Normalize-Identifier $_.Guid) -eq (Normalize-Identifier $key.PSChildName)
+                            (ConvertTo-NormalizedIdentifier $_.Guid) -eq (ConvertTo-NormalizedIdentifier $key.PSChildName)
                         } |
                         Select-Object -First 1
                 }
@@ -870,7 +1069,8 @@ function Get-WslDistributions {
                     $version = $status.Version
                 }
 
-                $file = Get-Item -LiteralPath $vhdxPath
+                $file = Get-Item -LiteralPath $vhdxPath -Force -ErrorAction Stop
+                $fileIdentity = Get-FileIdentityAtPath -Path $vhdxPath
                 $displayName = $wslName
                 $terminalName = $null
                 $state = $null
@@ -893,12 +1093,14 @@ function Get-WslDistributions {
                     Version      = $version
                     State        = $state
                     RegistryId   = $key.PSChildName
+                    FileIdentity = $fileIdentity
                     Unknown      = $false
                 }
 
                 $knownPaths[$vhdxPath.ToLowerInvariant()] = $true
             }
             catch {
+                Write-Verbose ('Skipping WSL registry entry: {0}' -f $key.PSChildName)
             }
         }
     }
@@ -907,22 +1109,30 @@ function Get-WslDistributions {
 
     if (Test-Path -LiteralPath $wslRoot -PathType Container) {
         foreach ($file in @(Get-ChildItem -LiteralPath $wslRoot -Filter 'ext4.vhdx' -File -Recurse -ErrorAction SilentlyContinue)) {
-            if ($knownPaths.ContainsKey($file.FullName.ToLowerInvariant())) {
+            $vhdxPath = ConvertTo-NormalizedPath $file.FullName
+
+            if ($null -eq $vhdxPath -or -not (Test-SafeVhdxPath -Path $vhdxPath)) {
                 continue
             }
 
-            $folder = Split-Path $file.DirectoryName -Leaf
+            if ($knownPaths.ContainsKey($vhdxPath.ToLowerInvariant())) {
+                continue
+            }
+
+            $folder = Split-Path $vhdxPath -Parent | Split-Path -Leaf
             $unregisteredName = (Get-Message 'UnregisteredVhdx') -f $folder
+            $fileIdentity = Get-FileIdentityAtPath -Path $vhdxPath
 
             $items += [pscustomobject] @{
                 WslName      = $unregisteredName
                 DisplayName  = $unregisteredName
                 TerminalName = $null
-                VhdxPath     = $file.FullName
+                VhdxPath     = $vhdxPath
                 SizeBytes    = [int64] $file.Length
                 Version      = 2
                 State        = $null
                 RegistryId   = $folder
+                FileIdentity = $fileIdentity
                 Unknown      = $true
             }
         }
@@ -931,7 +1141,7 @@ function Get-WslDistributions {
     return @($items | Sort-Object DisplayName)
 }
 
-function Format-Bytes {
+function Format-Byte {
     param(
         [Int64] $Bytes
     )
@@ -952,7 +1162,7 @@ function Format-Bytes {
     return '{0:N2} {1}' -f $value, $units[$unit]
 }
 
-function Show-Distributions {
+function Show-Distribution {
     param(
         [object[]] $Items
     )
@@ -992,7 +1202,7 @@ function Show-Distributions {
 
         Write-Host ('     {0} / {1} / {2}' -f $terminal, $state, $version)
         Write-Host ((Get-Message 'VhdxLabel') -f $item.VhdxPath)
-        Write-Host ((Get-Message 'SizeLabel') -f (Format-Bytes $item.SizeBytes))
+        Write-Host ((Get-Message 'SizeLabel') -f (Format-Byte $item.SizeBytes))
         Write-Host ''
     }
 }
@@ -1005,7 +1215,13 @@ function Resolve-Selection {
     )
 
     if ($SelectAll) {
-        return @($Items)
+        $unregistered = @($Items | Where-Object { $_.Unknown })
+
+        if ($unregistered.Count -gt 0) {
+            Write-Host (Get-Message 'AllSkipsUnregistered')
+        }
+
+        return @($Items | Where-Object { -not $_.Unknown })
     }
 
     $expanded = @(
@@ -1024,7 +1240,7 @@ function Resolve-Selection {
             }
 
             if ($inputValue -match '^(?i:a|all)$') {
-                return @($Items)
+                return @(Resolve-Selection -Items $Items -Selectors @() -SelectAll)
             }
 
             $expanded = @(
@@ -1051,20 +1267,20 @@ function Resolve-Selection {
                 continue
             }
 
-            $matches = @(
+            $nameMatches = @(
                 $Items |
                     Where-Object {
                         $_.DisplayName -ieq $selector -or $_.WslName -ieq $selector
                     }
             )
 
-            if ($matches.Count -eq 0) {
+            if ($nameMatches.Count -eq 0) {
                 Write-Host ((Get-Message 'DistributionNotFound') -f $selector)
                 $valid = $false
                 break
             }
 
-            $selected += $matches
+            $selected += $nameMatches
         }
 
         if ($valid) {
@@ -1075,7 +1291,7 @@ function Resolve-Selection {
     }
 }
 
-function Invoke-DiskPartCommands {
+function Invoke-DiskPartCommand {
     param(
         [Parameter(Mandatory)]
         [string[]] $Commands,
@@ -1085,12 +1301,38 @@ function Invoke-DiskPartCommands {
     )
 
     $diskPartScript = Join-Path ([IO.Path]::GetTempPath()) ('wsl-diskpart-{0}.txt' -f ([Guid]::NewGuid().ToString('N')))
+    $diskPartScriptStream = $null
+    $started = $false
 
     try {
+        if (-not (Test-NoReparsePointPath -Path ([IO.Path]::GetTempPath()))) {
+            throw 'The temporary directory is a reparse point or could not be validated.'
+        }
+
         $content = ($Commands -join [Environment]::NewLine) + [Environment]::NewLine
-        [IO.File]::WriteAllText($diskPartScript, $content, (Get-DiskPartScriptEncoding))
+        $encoding = Get-DiskPartScriptEncoding
+        $diskPartScriptStream = [IO.File]::Open(
+            $diskPartScript,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::Read
+        )
+        $bytes = $encoding.GetBytes($content)
+        $diskPartScriptStream.Write($bytes, 0, $bytes.Length)
+        $diskPartScriptStream.Flush($true)
+        $diskPartScriptStream.Dispose()
+        # Hold only read access so DiskPart can use its normal read sharing.
+        # Verify the exact bytes under this lock after reopening.
+        $diskPartScriptStream = [IO.File]::Open($diskPartScript, 'Open', 'Read', 'Read')
+        $verifiedBytes = New-Object byte[] $bytes.Length
+        $readCount = $diskPartScriptStream.Read($verifiedBytes, 0, $verifiedBytes.Length)
+        if ($readCount -ne $bytes.Length -or $diskPartScriptStream.Length -ne $bytes.Length -or
+            [Convert]::ToBase64String($verifiedBytes) -cne [Convert]::ToBase64String($bytes)) {
+            throw 'The temporary DiskPart script changed before execution.'
+        }
 
         $nativeResult = Invoke-NativeCommandCapture -FilePath 'diskpart.exe' -ArgumentList @('/s', $diskPartScript)
+        $started = [bool] $nativeResult.Started
         $outputParts = @()
 
         if (-not [string]::IsNullOrWhiteSpace($nativeResult.StandardOutput)) {
@@ -1121,20 +1363,80 @@ function Invoke-DiskPartCommands {
             Succeeded = ($nativeResult.ExitCode -eq 0 -and -not $hasError)
             Message   = $message
             Output    = $output
+            Started   = $started
         }
     }
     catch {
+        Write-Verbose $_.Exception.Message
         return [pscustomobject] @{
             Succeeded = $false
             Message   = Get-Message 'DiskPartInvokeFailed'
             Output    = ''
+            Started   = $started
         }
     }
     finally {
-        if (Test-Path -LiteralPath $diskPartScript) {
-            Remove-Item -LiteralPath $diskPartScript -Force -ErrorAction SilentlyContinue
+        if ($null -ne $diskPartScriptStream) {
+            $diskPartScriptStream.Dispose()
+        }
+
+        try {
+            if ([IO.File]::Exists($diskPartScript)) {
+                [IO.File]::Delete($diskPartScript)
+            }
+        }
+        catch {
+            Write-Verbose ('Could not remove the temporary DiskPart script: {0}' -f $diskPartScript)
         }
     }
+}
+
+function Get-VhdmpEventPropertyValue {
+    param(
+        [Parameter(Mandatory)]
+        [object] $EventRecord,
+
+        [Parameter(Mandatory)]
+        [int] $Index
+    )
+
+    if ($null -eq $EventRecord.Properties -or $EventRecord.Properties.Count -le $Index) {
+        return $null
+    }
+
+    return [string] $EventRecord.Properties[$Index].Value
+}
+
+function Get-VhdmpEventPath {
+    param(
+        [Parameter(Mandatory)]
+        [object] $EventRecord
+    )
+
+    $pathIndex = if ($EventRecord.Id -eq 51) { 1 } else { 0 }
+    return Get-VhdmpEventPropertyValue -EventRecord $EventRecord -Index $pathIndex
+}
+
+function Get-VhdmpEventOperation {
+    param(
+        [Parameter(Mandatory)]
+        [object] $EventRecord
+    )
+
+    if ($EventRecord.Id -ne 51) {
+        return $null
+    }
+
+    return Get-VhdmpEventPropertyValue -EventRecord $EventRecord -Index 0
+}
+
+function Test-VhdmpEventSuccess {
+    param(
+        [Parameter(Mandatory)]
+        [object] $EventRecord
+    )
+
+    return (Get-VhdmpEventPropertyValue -EventRecord $EventRecord -Index 2) -eq '0'
 }
 
 function Get-VhdmpEventValidation {
@@ -1181,7 +1483,9 @@ function Get-VhdmpEventValidation {
                     EndTime   = (Get-Date)
                 } -ErrorAction Stop |
                     Where-Object {
-                        ([string] $_.Message).IndexOf($VhdxPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                        $eventPath = Get-VhdmpEventPath -EventRecord $_
+                        [string]::Equals($eventPath, $VhdxPath, [StringComparison]::OrdinalIgnoreCase) -and
+                            (Test-VhdmpEventSuccess -EventRecord $_)
                     } |
                     Sort-Object RecordId
             )
@@ -1189,7 +1493,7 @@ function Get-VhdmpEventValidation {
             $result.QuerySucceeded = $true
         }
         catch {
-            if ($_.Exception.Message -match '(?i)no events were found|イベントが見つかりません') {
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
                 $result.QuerySucceeded = $true
                 $events = @()
             }
@@ -1211,7 +1515,11 @@ function Get-VhdmpEventValidation {
             if ($null -ne $attachEvent) {
                 $result.AttachSuccess = $true
                 $compactEvent = $events |
-                    Where-Object { $_.Id -eq 51 -and $_.RecordId -gt $attachEvent.RecordId } |
+                    Where-Object {
+                        $_.Id -eq 51 -and
+                        $_.RecordId -gt $attachEvent.RecordId -and
+                        (Get-VhdmpEventOperation -EventRecord $_) -ieq 'Compact'
+                    } |
                     Select-Object -First 1
 
                 if ($null -ne $compactEvent) {
@@ -1246,7 +1554,7 @@ function Invoke-DiskPartDetachBestEffort {
 
     $selectCommand = 'select vdisk file="{0}"' -f $VhdxPath
     $startedAt = Get-Date
-    $diskPartResult = Invoke-DiskPartCommands -Commands @(
+    $diskPartResult = Invoke-DiskPartCommand -Commands @(
         $selectCommand
         'detach vdisk noerr'
         'exit'
@@ -1293,11 +1601,11 @@ function Invoke-DiskPartCompact {
     for ($attempt = 1; $attempt -le $DiskPartMaxAttempts; $attempt++) {
         $stopRetrying = $false
         $startedAt = Get-Date
-        $diskPartResult = Invoke-DiskPartCommands -Commands $commands -VhdxPath $VhdxPath
+        $diskPartResult = Invoke-DiskPartCommand -Commands $commands -VhdxPath $VhdxPath
         $eventValidation = Get-VhdmpEventValidation -VhdxPath $VhdxPath -StartTime $startedAt
 
         if ($eventValidation.QuerySucceeded) {
-            if ($eventValidation.AttachSuccess -and $eventValidation.CompactSuccess -and $eventValidation.DetachSuccess) {
+            if ($diskPartResult.Started -and $diskPartResult.Succeeded -and $eventValidation.AttachSuccess -and $eventValidation.CompactSuccess -and $eventValidation.DetachSuccess) {
                 return [pscustomobject] @{
                     Succeeded = $true
                     Message   = Get-Message 'CompactConfirmed'
@@ -1344,9 +1652,9 @@ function Invoke-DiskPartCompact {
             $lastResult = $diskPartResult
         }
 
-        $cleanupNeeded =
-            -not $eventValidation.QuerySucceeded -or
-            ($eventValidation.AttachSuccess -and -not $eventValidation.DetachSuccess)
+        $cleanupNeeded = $diskPartResult.Started -and (
+            -not $eventValidation.QuerySucceeded -or -not $eventValidation.DetachSuccess
+        )
         $willRetry = $attempt -lt $DiskPartMaxAttempts -and -not $stopRetrying
 
         if ($willRetry) {
@@ -1374,6 +1682,8 @@ function Invoke-DiskPartCompact {
     return $lastResult
 }
 
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 $distroCount = if ($null -eq $Distro) { 0 } else { $Distro.Count }
 
 if (
@@ -1396,14 +1706,14 @@ Write-Host (Get-Message 'Title')
 Write-Host (Get-Message 'Subtitle')
 Write-Host ''
 
-$items = @(Get-WslDistributions)
+$items = @(Get-WslDistribution)
 
 if ($items.Count -eq 0) {
     Write-Host (Get-Message 'NoTargets')
     exit 1
 }
 
-Show-Distributions $items
+Show-Distribution $items
 
 if ($List) {
     exit 0
@@ -1447,6 +1757,9 @@ Write-Host (Get-Message 'ShuttingDown')
 $shutdownOutput = (& wsl.exe --shutdown 2>&1 | Out-String).Trim()
 
 if ($LASTEXITCODE -ne 0) {
+    if (-not [string]::IsNullOrWhiteSpace($shutdownOutput)) {
+        Write-Error -Message $shutdownOutput -ErrorAction Continue
+    }
     Write-Error -Message ((Get-Message 'ShutdownFailed') -f $LASTEXITCODE) -ErrorAction Continue
 
     exit 1
@@ -1467,8 +1780,13 @@ foreach ($item in $selected) {
     $processedCount++
     Write-Host ('[{0}] {1}' -f $item.DisplayName, (Get-Message 'Compressing'))
 
+    $vhdxLease = $null
     try {
-        $before = (Get-Item -LiteralPath $item.VhdxPath -ErrorAction Stop).Length
+        if ([string]::IsNullOrWhiteSpace($item.FileIdentity)) {
+            throw 'The target file identity could not be established during discovery.'
+        }
+        $vhdxLease = Open-VhdxLease -Path $item.VhdxPath -ExpectedIdentity $item.FileIdentity
+        $before = $vhdxLease.Length
     }
     catch {
         $failed++
@@ -1486,6 +1804,9 @@ foreach ($item in $selected) {
             Output    = ''
         }
     }
+    finally {
+        if ($null -ne $vhdxLease) { $vhdxLease.Stream.Dispose() }
+    }
 
     if (-not $result.Succeeded) {
         $failed++
@@ -1496,7 +1817,9 @@ foreach ($item in $selected) {
     }
 
     try {
-        $after = (Get-Item -LiteralPath $item.VhdxPath -ErrorAction Stop).Length
+        $afterLease = Open-VhdxLease -Path $item.VhdxPath -ExpectedIdentity $item.FileIdentity
+        try { $after = $afterLease.Length }
+        finally { $afterLease.Stream.Dispose() }
     }
     catch {
         $failed++
@@ -1509,7 +1832,7 @@ foreach ($item in $selected) {
     }
 
     Write-Host (Get-Message 'Completed')
-    Write-Host ((Get-Message 'SizeChange') -f (Format-Bytes $before), (Format-Bytes $after))
+    Write-Host ((Get-Message 'SizeChange') -f (Format-Byte $before), (Format-Byte $after))
 }
 
 if ($failed -gt 0) {
