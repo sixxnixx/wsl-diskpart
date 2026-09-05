@@ -294,32 +294,6 @@ function ConvertTo-ProcessArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
-function Convert-NativeBytesToText {
-    param(
-        [AllowNull()]
-        [byte[]] $Bytes
-    )
-
-    if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
-        return ''
-    }
-
-    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
-        return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
-    }
-
-    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
-        return [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
-    }
-
-    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
-        return [Text.Encoding]::UTF8.GetString($Bytes, 3, $Bytes.Length - 3)
-    }
-
-    # wsl.exe and diskpart.exe emit UTF-16LE when their output is redirected.
-    return [Text.Encoding]::Unicode.GetString($Bytes)
-}
-
 function Get-DiskPartScriptEncoding {
     # DiskPart's /s reader expects a legacy text script. UTF-16LE inserts NUL
     # bytes between ASCII command characters and can make the script a no-op.
@@ -346,45 +320,47 @@ function Invoke-NativeCommandCapture {
         [Parameter(Mandatory)]
         [string] $FilePath,
 
-        [string[]] $ArgumentList = @()
+        [string[]] $ArgumentList = @(),
+
+        [AllowNull()]
+        [Text.Encoding] $OutputEncoding
     )
 
-    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('wsl-diskpart-native-{0}' -f ([Guid]::NewGuid().ToString('N')))
-    $stdoutPath = $tempRoot + '.out'
-    $stderrPath = $tempRoot + '.err'
     $started = $false
+    $process = $null
 
     try {
-        if (-not (Test-NoReparsePointPath -Path ([IO.Path]::GetTempPath()))) {
-            throw 'The temporary directory is a reparse point or could not be validated.'
-        }
-
         $argumentString = @(
             $ArgumentList |
                 Where-Object { $null -ne $_ } |
                 ForEach-Object { ConvertTo-ProcessArgument ([string] $_) }
         ) -join ' '
 
-        $process = Start-Process `
-            -FilePath $FilePath `
-            -ArgumentList $argumentString `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $FilePath
+        $startInfo.Arguments = $argumentString
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        if ($null -ne $OutputEncoding) {
+            $startInfo.StandardOutputEncoding = $OutputEncoding
+            $startInfo.StandardErrorEncoding = $OutputEncoding
+        }
+
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $startInfo
+
+        if (-not $process.Start()) {
+            throw 'The native process could not be started.'
+        }
+
         $started = $true
-
-        $stdout = ''
-        $stderr = ''
-
-        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
-            $stdout = Convert-NativeBytesToText ([IO.File]::ReadAllBytes($stdoutPath))
-        }
-
-        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-            $stderr = Convert-NativeBytesToText ([IO.File]::ReadAllBytes($stderrPath))
-        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
 
         return [pscustomobject] @{
             ExitCode       = [int] $process.ExitCode
@@ -402,10 +378,8 @@ function Invoke-NativeCommandCapture {
         }
     }
     finally {
-        foreach ($path in @($stdoutPath, $stderrPath)) {
-            if (Test-Path -LiteralPath $path) {
-                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-            }
+        if ($null -ne $process) {
+            $process.Dispose()
         }
     }
 }
@@ -980,7 +954,10 @@ function Convert-WslState {
 
 function Get-WslStatus {
     try {
-        $nativeResult = Invoke-NativeCommandCapture -FilePath 'wsl.exe' -ArgumentList @('--list', '--verbose')
+        $nativeResult = Invoke-NativeCommandCapture `
+            -FilePath 'wsl.exe' `
+            -ArgumentList @('--list', '--verbose') `
+            -OutputEncoding ([Text.Encoding]::Unicode)
 
         if ($nativeResult.ExitCode -ne 0) {
             return @()
@@ -1331,7 +1308,10 @@ function Invoke-DiskPartCommand {
             throw 'The temporary DiskPart script changed before execution.'
         }
 
-        $nativeResult = Invoke-NativeCommandCapture -FilePath 'diskpart.exe' -ArgumentList @('/s', $diskPartScript)
+        $nativeResult = Invoke-NativeCommandCapture `
+            -FilePath 'diskpart.exe' `
+            -ArgumentList @('/s', $diskPartScript) `
+            -OutputEncoding ([Text.Encoding]::Unicode)
         $started = [bool] $nativeResult.Started
         $outputParts = @()
 
