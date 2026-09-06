@@ -1,0 +1,22 @@
+# Windows and editor files
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# PowerShell, Pester, and CI output
+TestResults/
+coverage/
+*.pester.xml
+*.TestResult.xml
+*.trx
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Virtual disk images can be large and may contain private data.
+*.vhd
+*.vhdx
+*.avhd
+*.avhdx

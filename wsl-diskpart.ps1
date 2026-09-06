@@ -12,9 +12,7 @@ param(
     [Alias('y')]
     [switch] $Yes,
 
-    [switch] $DryRun,
-
-    [switch] $NoElevation
+    [switch] $DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1581,10 +1579,10 @@ function Invoke-DiskPartCompact {
     }
 
     for ($attempt = 1; $attempt -le $DiskPartMaxAttempts; $attempt++) {
-        $stopRetrying = $false
         $startedAt = Get-Date
         $diskPartResult = Invoke-DiskPartCommand -Commands $commands -VhdxPath $VhdxPath
         $eventValidation = Get-VhdmpEventValidation -VhdxPath $VhdxPath -StartTime $startedAt
+        $stopRetrying = -not $diskPartResult.Started
 
         if ($eventValidation.QuerySucceeded) {
             if ($diskPartResult.Started -and $diskPartResult.Succeeded -and $eventValidation.AttachSuccess -and $eventValidation.CompactSuccess -and $eventValidation.DetachSuccess) {
@@ -1684,7 +1682,6 @@ if (
 if (
     -not $List -and
     -not $DryRun -and
-    -not $NoElevation -and
     -not (Test-Administrator)
 ) {
     exit (Start-ElevatedSelf)

@@ -107,7 +107,12 @@ If a VHDX is temporarily in use, the utility waits and retries the operation up 
 - VHDX files are modified during compaction. Keep a backup of important environments.
 - A successful compaction does not guarantee a smaller file. The size may remain unchanged when the guest filesystem has not released unused blocks or there is little reclaimable space.
 - If the file size does not decrease, remove unnecessary data inside the distribution and, when supported by the guest filesystem, run `sudo fstrim -av` before trying again.
+- If `wsl.exe --list --verbose` cannot be read, registered information may be unavailable and a VHDX may appear as `Unregistered VHDX` with an unknown state. Run the command as the Windows user that owns the distribution and confirm that it works before using `-All`.
 - If processing fails, review the displayed DiskPart output and the `Microsoft-Windows-VHDMP/Operational` event log, then close remaining WSL clients and retry.
+
+### License
+
+This project is licensed under the Apache License, Version 2.0. You may use, modify, and redistribute it, including forked versions, provided that you comply with the license. Redistributed source or binary packages must include a copy of [LICENSE](LICENSE) and preserve the attribution in [NOTICE](NOTICE). Modified files must be clearly marked as changed. When redistributing a fork or modified version, keep the original project URL in the attribution notice and add your own project or author information alongside it.
 
 ---
 
@@ -216,4 +221,9 @@ VHDXが一時的に使用中の場合は、解放を待って最大3回まで処
 - 圧縮処理中にVHDXファイルが変更されるため、重要な環境のバックアップを保管してください。
 - 圧縮が成功しても、ファイルサイズが小さくなるとは限りません。ゲストファイルシステムが未使用ブロックを解放していない場合や、回収できる領域が少ない場合は、サイズが変わらないことがあります。
 - ファイルサイズが小さくならない場合は、ディストロ内で不要なデータを削除し、ゲストファイルシステムが対応していれば、再実行前に`sudo fstrim -av`を実行してください。
+- `wsl.exe --list --verbose`を読み取れない場合は、登録情報を取得できず、VHDXが`Unregistered VHDX`や状態不明として表示されることがあります。ディストロを所有するWindowsユーザーでコマンドが正常に動作することを確認してから、`-All`を使用してください。
 - 処理に失敗した場合は、表示されたDiskPartの出力と`Microsoft-Windows-VHDMP/Operational`イベントログを確認し、残っているWSLクライアントを終了してから再実行してください。
+
+### ライセンス
+
+このプロジェクトは Apache License 2.0 で提供します。ライセンスに従う限り、利用、改変、再配布（forkした版を含む）ができます。再配布するソースまたはバイナリには[LICENSE](LICENSE)のコピーを含め、[NOTICE](NOTICE)の帰属表示を保持してください。変更したファイルには、変更したことが分かる表示を付けてください。fork版や改変版を再配布する場合は、帰属表示に元プロジェクトのURLを残し、その横に自分のプロジェクト名や作者情報を追加してください。

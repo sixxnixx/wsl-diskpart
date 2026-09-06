@@ -1,0 +1,10 @@
+# Keep documentation and CI configuration portable across platforms.
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Keep Windows executable scripts in their native line-ending format.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.psd1 text eol=crlf
