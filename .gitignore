@@ -5,6 +5,10 @@ Desktop.ini
 .idea/
 
 # PowerShell, Pester, and CI output
+PSScriptAnalyzerSettings.psd1
+tests/
+.github/
+.local-dev/
 TestResults/
 coverage/
 *.pester.xml

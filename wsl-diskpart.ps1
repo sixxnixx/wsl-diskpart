@@ -1,5 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Interactive CUI output is intentional.')]
 param(
     [Alias('d')]
     [string[]] $Distro,
