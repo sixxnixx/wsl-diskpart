@@ -152,6 +152,7 @@ $script:Messages = @{
         ListSeparator                 = ', '
         CompletionUnconfirmed         = 'Could not confirm DiskPart completion: {0}'
         DiskPartExecutionFailed       = 'DiskPart execution failed: {0}; missing completion events: {1}'
+        NativeOutput                  = 'DiskPart output: {0}'
         EventLogUnavailable           = 'DiskPart exited with code 0, but the VHDMP event log was unavailable, so completion could not be verified.'
         DetachUnconfirmed             = 'DiskPart detach completion could not be confirmed.'
         DetachCleanupFailed           = 'Best-effort VHDX detach failed: {0}'
@@ -217,6 +218,7 @@ $script:Messages = @{
         ListSeparator                 = '、'
         CompletionUnconfirmed         = 'DiskPartの完了を確認できませんでした: {0}'
         DiskPartExecutionFailed       = 'DiskPartの実行に失敗しました: {0}; 完了イベント不足: {1}'
+        NativeOutput                  = 'DiskPart出力: {0}'
         EventLogUnavailable           = 'DiskPartは終了コード0を返しましたが、VHDMPイベントログを利用できないため完了を確認できませんでした。'
         DetachUnconfirmed             = 'DiskPartによる切り離し完了を確認できませんでした。'
         DetachCleanupFailed           = 'VHDXの切り離し再試行に失敗しました: {0}'
@@ -1650,7 +1652,13 @@ function Invoke-DiskPartCompact {
 
             if (-not $cleanupResult.Succeeded) {
                 $lastResult.Message = '{0} {1}' -f $lastResult.Message, ((Get-Message 'DetachCleanupFailed') -f $cleanupResult.Message)
-                $stopRetrying = $true
+
+                # If attach was not confirmed and the event query succeeded,
+                # the cleanup failure can itself be caused by the same
+                # transient sharing violation. Keep the retry path alive.
+                if (-not $eventValidation.QuerySucceeded -or $eventValidation.AttachSuccess) {
+                    $stopRetrying = $true
+                }
             }
         }
 
@@ -1792,6 +1800,10 @@ foreach ($item in $selected) {
         $failed++
         Write-Error -Message ((Get-Message 'Failed') -f $result.Message) -ErrorAction Continue
         Write-Error -Message (Get-Message 'NativeDetails') -ErrorAction Continue
+
+        if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
+            Write-Error -Message ((Get-Message 'NativeOutput') -f $result.Output) -ErrorAction Continue
+        }
 
         continue
     }

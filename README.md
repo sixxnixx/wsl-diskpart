@@ -1,147 +1,219 @@
-# WSL VHDX Compactor
+# WSL VHDX Compactor / WSL VHDX コンパクター
 
-A CUI utility that runs in PowerShell. It shuts down WSL and executes DiskPart's `attach`, `compact`, and `detach` commands in sequence for each target distribution's `ext4.vhdx`.
+[English](#english) · [日本語](#日本語)
 
-## Usage
+## English
 
-Move to the project directory in PowerShell and run the following commands.
+### Overview
 
-    Set-ExecutionPolicy -Scope Process Bypass
-    .\wsl-diskpart.ps1
+WSL VHDX Compactor is a PowerShell utility for compacting WSL 2 virtual hard disk files (`ext4.vhdx`) with Windows DiskPart.
 
-When launched, the utility displays detected WSL distributions and their VHDX locations, and lets you select targets by number. For operations that require administrator privileges, it automatically restarts as administrator through UAC.
+The utility detects available WSL 2 VHDX files, lets you choose one or more targets, shuts down WSL, runs DiskPart, and verifies that the operation completed successfully.
 
-Fixed runtime messages follow the OS UI language. Japanese (`ja-*`) displays Japanese; all other languages display English. Distribution names, paths, and other identifiers are left unchanged.
+> **Warning:** The utility stops all WSL distributions and modifies VHDX files. Back up important environments before running it.
 
-    # Display detected targets only
-    .\wsl-diskpart.ps1 -List
+### Requirements
 
-    # Process all registered targets
-    .\wsl-diskpart.ps1 -All
+- Windows with WSL 2 installed.
+- PowerShell 5.1 or later.
+- Windows DiskPart.
+- Administrator privileges for compaction. The utility requests elevation through UAC when needed.
 
-    # Specify a Windows Terminal display name or WSL name
-    .\wsl-diskpart.ps1 -Distro Ubuntu
+`-List` and `-DryRun` only inspect and display targets. They do not shut down WSL or modify VHDX files.
 
-    # Specify multiple targets by number
-    .\wsl-diskpart.ps1 -Distro 1,3
+### Quick start
 
-    # Check targets only without making changes
-    .\wsl-diskpart.ps1 -All -DryRun
+Open PowerShell in the project directory and run:
 
-    # Skip the final confirmation
-    .\wsl-diskpart.ps1 -All -Yes
+```powershell
+.\wsl-diskpart.cmd
+```
 
-## Distribution and VHDX Mapping
+The wrapper automatically uses `pwsh.exe` when it is available and otherwise uses Windows PowerShell.
 
-VHDX paths are searched in the following order.
+To run the PowerShell script directly, use a process-scoped execution-policy override if your current policy blocks scripts:
 
-1. WSL registration information under `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
-2. `BasePath` and `VhdFileName` in the registry
-3. `%LOCALAPPDATA%\wsl\<registration ID>\ext4.vhdx`
-4. `ext4.vhdx` files under `%LOCALAPPDATA%\wsl`
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\wsl-diskpart.ps1
+```
 
-Display names are matched against `profiles.list[].name` in Windows Terminal's `settings.json`. If no match is found, the WSL `DistributionName` is used. JSONC comments and trailing commas are supported.
+The utility displays the detected targets and then asks you to select the targets to process. It asks for confirmation before shutting down WSL. When administrator privileges are required, Windows displays a UAC prompt.
 
-VHDX files that are not registered in the registry are displayed as `Unregistered VHDX`. `-All` and interactive `A` exclude them; select them explicitly by number or name. Only local `.vhdx` files without reparse points are eligible. The utility verifies the discovered file identity again before processing.
+### Select targets
 
-## DiskPart Commands
+When no target option is supplied, select targets interactively at the prompt:
 
-After target confirmation, the utility creates a temporary script for each distribution and executes the following commands.
+- Enter a number such as `1`.
+- Enter multiple numbers separated by commas, such as `1,3`.
+- Enter a Windows Terminal display name or a WSL distribution name, such as `Ubuntu-26.04`.
+- Enter `A` to select all registered targets.
+- Enter `Q` to cancel.
 
-    wsl.exe --shutdown
-    select vdisk file="<absolute path to ext4.vhdx>"
-    attach vdisk readonly
-    compact vdisk
-    detach vdisk
-    exit
+Registered WSL 2 VHDX files are shown with their distribution information. Additional local `ext4.vhdx` files that are not registered with WSL may also be shown as `Unregistered VHDX`.
 
-All DiskPart commands for a target are executed in one script. The temporary script loaded with `/s` is generated using the system ANSI code page supported by DiskPart. The utility waits 15 seconds after shutting down WSL and between multiple distribution operations so that the VHDX can be released. If the file is in use, it retries up to three times and verifies attach, compact, and detach completion in the VHDMP event log.
+`-All` and interactive `A` select registered targets only. Select an unregistered VHDX explicitly by its number or displayed name if you are certain that it is the intended file. Only local, regular `.vhdx` files are eligible.
 
-## Notes
+### Command-line options
 
-Development checks (no WSL shutdown or DiskPart execution):
+Use one target selector: interactive selection, `-Distro`, or `-All`. Do not combine `-List`, `-Distro`, and `-All`.
 
-    Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
-    Invoke-Pester -Script .\tests\wsl-diskpart.Tests.ps1
+| Option | Description |
+| --- | --- |
+| *(none)* | Display targets and select them interactively. |
+| `-List` | Display detected targets and exit without changing anything. |
+| `-Distro <target>` | Process the specified distribution name or target number. Use commas for multiple targets, for example `-Distro 1,3`. |
+| `-All` | Process all registered targets. Unregistered VHDX files are excluded. |
+| `-DryRun` | Display the selected targets without shutting down WSL or changing any files. |
+| `-Yes` | Skip the final confirmation prompt. WSL is still shut down when processing starts. |
 
-The analyzer settings exclude only `PSAvoidUsingWriteHost`, because this utility intentionally uses host output for its interactive interface. The regression tests mock DiskPart and event queries; they do not replace an elevated compaction integration test.
+Examples:
 
-- `wsl --shutdown` stops all running WSL distributions.
-- Close applications that use WSL, such as Docker Desktop and WSL tabs in Windows Terminal, before running the utility.
-- Back up important environments beforehand because the utility modifies VHDX files.
-- If DiskPart fails, review the output for the target distribution before running the utility again.
-- The file size may not change significantly if unused space has not been released inside the guest environment, for example.
+```powershell
+# Display detected targets only
+.\wsl-diskpart.ps1 -List
 
-# WSL VHDX コンパクター
+# Process one distribution by name
+.\wsl-diskpart.ps1 -Distro Ubuntu-26.04
 
-PowerShellで動作するCUIユーティリティです。WSLを停止し、対象ディストロの`ext4.vhdx`に対してDiskPartの`attach`、`compact`、`detach`を順番に実行します。
+# Process targets 1 and 3
+.\wsl-diskpart.ps1 -Distro 1,3
 
-## 実行方法
+# Preview all registered targets
+.\wsl-diskpart.ps1 -All -DryRun
 
-PowerShellでプロジェクトフォルダへ移動し、次のように実行します。
+# Process all registered targets without the final prompt
+.\wsl-diskpart.ps1 -All -Yes
+```
 
-    Set-ExecutionPolicy -Scope Process Bypass
-    .\wsl-diskpart.ps1
+### What happens during processing
 
-起動すると検出したWSLディストロとVHDXの場所を表示し、番号で対象を選択できます。管理者権限が必要な処理では、UACを経由して自動的に管理者として再起動します。
+During processing, the utility:
 
-実行時の固定メッセージはOSのUI言語に合わせて切り替わります。日本語（`ja-*`）の場合は日本語、それ以外の場合は英語で表示します。ディストロ名やパスなどの識別情報はそのまま表示します。
+1. Stops all WSL distributions once with `wsl.exe --shutdown`.
+2. Waits for WSL to release the VHDX.
+3. For each selected target, attaches the VHDX as read-only with DiskPart.
+4. Runs `compact vdisk`.
+5. Detaches the VHDX.
+6. Confirms the attach, compact, and detach operations using the VHDMP event log.
+7. Reports the VHDX size before and after processing.
 
-    # 検出結果だけを表示
-    .\wsl-diskpart.ps1 -List
+If a VHDX is temporarily in use, the utility waits and retries the operation up to three times. Processing multiple targets also includes a wait between targets.
 
-    # 登録済みの対象をすべて処理
-    .\wsl-diskpart.ps1 -All
+### Notes and troubleshooting
 
-    # Windows Terminalの表示名またはWSL名で指定
-    .\wsl-diskpart.ps1 -Distro Ubuntu
+- `wsl.exe --shutdown` stops every running WSL distribution, not only the selected one.
+- Close applications that can use or restart WSL, including Docker Desktop, Windows Terminal WSL tabs, IDE integrations, and file-management tools that have the VHDX open.
+- VHDX files are modified during compaction. Keep a backup of important environments.
+- A successful compaction does not guarantee a smaller file. The size may remain unchanged when the guest filesystem has not released unused blocks or there is little reclaimable space.
+- If the file size does not decrease, remove unnecessary data inside the distribution and, when supported by the guest filesystem, run `sudo fstrim -av` before trying again.
+- If processing fails, review the displayed DiskPart output and the `Microsoft-Windows-VHDMP/Operational` event log, then close remaining WSL clients and retry.
 
-    # 番号で複数指定
-    .\wsl-diskpart.ps1 -Distro 1,3
+---
 
-    # 対象確認だけ行い、変更しない
-    .\wsl-diskpart.ps1 -All -DryRun
+## 日本語
 
-    # 最終確認を省略
-    .\wsl-diskpart.ps1 -All -Yes
+### 概要
 
-## ディストロとVHDXの対応
+WSL VHDX コンパクターは、WindowsのDiskPartを使用してWSL 2の仮想ハードディスクファイル（`ext4.vhdx`）を圧縮するPowerShellユーティリティです。
 
-VHDXのパスは次の順番で探索します。
+利用可能なWSL 2のVHDXファイルを検出し、処理する対象を1つ以上選択すると、WSLを停止してDiskPartを実行し、処理が正常に完了したことを確認します。
 
-1. `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` のWSL登録情報
-2. レジストリの`BasePath`と`VhdFileName`
-3. `%LOCALAPPDATA%\wsl\<登録ID>\ext4.vhdx`
-4. `%LOCALAPPDATA%\wsl` 以下の`ext4.vhdx`
+> **警告:** このユーティリティは、すべてのWSLディストロを停止し、VHDXファイルを変更します。実行前に重要な環境をバックアップしてください。
 
-表示名はWindows Terminalの`settings.json`にある`profiles.list[].name`と照合します。照合できない場合はWSLの`DistributionName`を使用します。JSONCのコメントと末尾カンマにも対応しています。
+### 必要条件
 
-レジストリに登録されていないVHDXは「未登録 VHDX」として表示します。`-All`と対話選択の`A`からは除外するため、処理する場合は番号または名前で明示的に選択してください。対象はreparse pointを含まないローカルの`.vhdx`ファイルに限定し、処理前に検出時と同じファイルであることを再確認します。
+- WSL 2がインストールされたWindows。
+- PowerShell 5.1以降。
+- WindowsのDiskPart。
+- 圧縮処理に必要な管理者権限。必要な場合はUACを通じて昇格を要求します。
 
-## 実行するDiskPartコマンド
+`-List`と`-DryRun`は対象の確認と表示だけを行います。WSLの停止やVHDXファイルの変更は行いません。
 
-対象確認後、ディストロごとに一時スクリプトを作成して、次の処理を実行します。
+### はじめに
 
-    wsl.exe --shutdown
-    select vdisk file="<ext4.vhdxの絶対パス>"
-    attach vdisk readonly
-    compact vdisk
-    detach vdisk
-    exit
+PowerShellでプロジェクトフォルダに移動し、次を実行します。
 
-DiskPartの各コマンドは1つのスクリプトで実行します。`/s`で読み込ませる一時スクリプトは、DiskPartが扱えるシステムANSIコードページで生成します。WSLの停止後と複数ディストロの処理間には、VHDXの解放を待つため15秒の待機を入れます。ファイルが使用中の場合は最大3回まで再試行し、VHDMPイベントログでアタッチ、圧縮、デタッチの完了を確認します。
+```powershell
+.\wsl-diskpart.cmd
+```
 
-## 注意事項
+このラッパーは、`pwsh.exe`が利用可能な場合はそれを使用し、利用できない場合はWindows PowerShellを使用します。
 
-開発時の検証（WSL停止・DiskPart実行なし）:
+PowerShellの実行ポリシーによってスクリプトの実行がブロックされる場合は、プロセス単位で実行ポリシーを変更して、PowerShellスクリプトを直接実行できます。
 
-    Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
-    Invoke-Pester -Script .\tests\wsl-diskpart.Tests.ps1
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\wsl-diskpart.ps1
+```
 
-静的解析では、対話画面の表示に使用する`PSAvoidUsingWriteHost`だけを設定で除外しています。回帰テストではDiskPartとイベント取得をモック化しているため、管理者権限での実圧縮の結合テストは別途必要です。
+ユーティリティは検出した対象を表示し、処理する対象を選択するよう求めます。WSLを停止する前に確認を求めます。管理者権限が必要な場合は、WindowsがUACの確認画面を表示します。
 
-- `wsl --shutdown`により、起動中のすべてのWSLディストロが停止します。
-- Docker DesktopやWindows TerminalのWSLタブなど、WSLを使用するアプリは事前に終了してください。
-- VHDXを変更するため、重要な環境では事前にバックアップを作成してください。
-- DiskPartが失敗した場合は、対象ディストロの出力を確認してから再実行してください。
-- 圧縮後もゲスト側で未使用領域が解放されていない場合などは、ファイルサイズが大きく変わらないことがあります。
+### 対象の選択
+
+対象オプションを指定しない場合は、プロンプトで対話的に対象を選択します。
+
+- `1`のように番号を入力する。
+- `1,3`のようにカンマで区切って複数の番号を入力する。
+- `Ubuntu-26.04`のように、Windows Terminalの表示名またはWSLディストロ名を入力する。
+- `A`を入力して、登録済みの対象をすべて選択する。
+- `Q`を入力してキャンセルする。
+
+登録済みのWSL 2 VHDXファイルは、ディストロ情報とともに表示されます。WSLに登録されていないローカルの`ext4.vhdx`ファイルが、`Unregistered VHDX`として表示される場合もあります。
+
+`-All`と対話選択の`A`では、登録済みの対象だけを選択します。未登録VHDXを処理する場合は、意図したファイルであることを確認したうえで、番号または表示名で明示的に選択してください。対象になるのは、ローカルにある通常の`.vhdx`ファイルだけです。
+
+### コマンドラインオプション
+
+対象の指定方法は、対話選択、`-Distro`、`-All`のいずれか1つを使用します。`-List`、`-Distro`、`-All`は同時に指定できません。
+
+| オプション | 説明 |
+| --- | --- |
+| （なし） | 対象を表示し、対話的に選択する。 |
+| `-List` | 検出した対象を表示して終了する。変更は行わない。 |
+| `-Distro <target>` | 指定したディストロ名または対象番号を処理する。複数の場合は`-Distro 1,3`のようにカンマで区切る。 |
+| `-All` | 登録済みの対象をすべて処理する。未登録VHDXは除外する。 |
+| `-DryRun` | WSLを停止したりファイルを変更したりせず、選択した対象だけを表示する。 |
+| `-Yes` | 最終確認を省略する。処理を開始するとWSLは停止する。 |
+
+使用例:
+
+```powershell
+# 検出した対象だけを表示
+.\wsl-diskpart.ps1 -List
+
+# 名前で1つのディストロを処理
+.\wsl-diskpart.ps1 -Distro Ubuntu-26.04
+
+# 1番と3番の対象を処理
+.\wsl-diskpart.ps1 -Distro 1,3
+
+# 登録済みの全対象を事前確認
+.\wsl-diskpart.ps1 -All -DryRun
+
+# 最終確認なしで登録済みの全対象を処理
+.\wsl-diskpart.ps1 -All -Yes
+```
+
+### 処理の流れ
+
+処理中、ユーティリティは次の処理を行います。
+
+1. `wsl.exe --shutdown`を1回実行して、すべてのWSLディストロを停止する。
+2. WSLがVHDXを解放するまで待機する。
+3. 選択した対象ごとに、DiskPartでVHDXを読み取り専用としてアタッチする。
+4. `compact vdisk`を実行する。
+5. VHDXをデタッチする。
+6. VHDMPイベントログを使って、アタッチ、圧縮、デタッチの完了を確認する。
+7. 処理前後のVHDXサイズを表示する。
+
+VHDXが一時的に使用中の場合は、解放を待って最大3回まで処理を再試行します。複数の対象を処理する場合も、対象ごとに待機時間を入れます。
+
+### 注意事項とトラブルシューティング
+
+- `wsl.exe --shutdown`は、選択したディストロだけでなく、実行中のすべてのWSLディストロを停止します。
+- Docker Desktop、Windows TerminalのWSLタブ、IDEのWSL連携、VHDXを開いているファイル管理ツールなど、WSLを使用または再起動する可能性があるアプリを終了してください。
+- 圧縮処理中にVHDXファイルが変更されるため、重要な環境のバックアップを保管してください。
+- 圧縮が成功しても、ファイルサイズが小さくなるとは限りません。ゲストファイルシステムが未使用ブロックを解放していない場合や、回収できる領域が少ない場合は、サイズが変わらないことがあります。
+- ファイルサイズが小さくならない場合は、ディストロ内で不要なデータを削除し、ゲストファイルシステムが対応していれば、再実行前に`sudo fstrim -av`を実行してください。
+- 処理に失敗した場合は、表示されたDiskPartの出力と`Microsoft-Windows-VHDMP/Operational`イベントログを確認し、残っているWSLクライアントを終了してから再実行してください。
